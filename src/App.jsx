@@ -5,7 +5,7 @@ import {
   Copy, Trash2, Calendar, FileText, Mail, Settings, X, User
 } from 'lucide-react';
 
-// lamejsをCDNから動的に読み込む関数
+// lamejsをCDNから動的に読み込む
 const loadLamejs = () => {
   return new Promise((resolve, reject) => {
     if (window.lamejs) {
@@ -172,20 +172,63 @@ const splitTextIntoChunks = (text, maxLength = 15000) => {
   return chunks;
 };
 
-// ★改良: 文字起こしテキストを見やすいオブジェクト配列にパースする関数
+// ★話者名を正規化する関数
+const normalizeSpeakerName = (rawName) => {
+  if (!rawName) return "顧客";
+  const members = ["金子", "高島", "川越", "澤田", "上田"];
+  
+  // メンバー名が含まれていればその名前に統一
+  for (const member of members) {
+    if (rawName.includes(member)) {
+      return member;
+    }
+  }
+  // メンバー以外はすべて「顧客」
+  return "顧客";
+};
+
+// 文字起こしテキストをパースする関数
 const parseTranscript = (text) => {
   if (!text) return [];
   return text.split('\n').filter(line => line.trim() !== '').map(line => {
-    // "名前: 発言" の形式を探す
     const colonIndex = line.indexOf(':');
     if (colonIndex !== -1) {
+      const rawSpeaker = line.substring(0, colonIndex).trim();
       return {
-        speaker: line.substring(0, colonIndex).trim(),
+        speaker: normalizeSpeakerName(rawSpeaker), // 正規化を適用
         text: line.substring(colonIndex + 1).trim()
       };
     }
-    return { speaker: '', text: line };
+    return { speaker: '顧客', text: line }; // コロンがない場合はとりあえず顧客
   });
+};
+
+const mergeAnalysisResults = (results) => {
+  const merged = {
+    summary: [],
+    actionItems: [],
+    sentiment: "Neutral",
+    sentimentScore: 0
+  };
+
+  let totalScore = 0;
+  let validScoreCount = 0;
+
+  results.forEach(res => {
+    if (res.summary && Array.isArray(res.summary)) merged.summary.push(...res.summary);
+    if (res.actionItems && Array.isArray(res.actionItems)) merged.actionItems.push(...res.actionItems);
+    if (typeof res.sentimentScore === 'number') {
+      totalScore += res.sentimentScore;
+      validScoreCount++;
+    }
+  });
+
+  const avgScore = validScoreCount > 0 ? totalScore / validScoreCount : 0.5;
+  merged.sentimentScore = avgScore;
+  merged.sentiment = avgScore >= 0.6 ? "Positive" : avgScore <= 0.4 ? "Negative" : "Neutral";
+  merged.summary = [...new Set(merged.summary)];
+  
+  return merged;
 };
 
 const App = () => {
@@ -280,7 +323,6 @@ const App = () => {
 
         const transcriptText = await callGeminiDirectly(apiKey, transcriptPrompt, audioBase64, "text/plain");
         
-        // 前回の修正と同様のクリーニング処理
         let cleanedChunk = transcriptText;
         try {
             const jsonStart = transcriptText.indexOf('[');
@@ -321,7 +363,7 @@ const App = () => {
 
       if (!fullTranscript.trim()) throw new Error("文字起こしが生成されませんでした。");
 
-      // Phase 2: 要約 (分割して情報を抽出し、最後に統合する)
+      // Phase 2: 要約 (分割して情報を抽出)
       const textChunks = splitTextIntoChunks(fullTranscript, 12000);
       const partialSummaries = [];
 
@@ -329,7 +371,6 @@ const App = () => {
         const chunk = textChunks[i];
         setStatusMessage(`内容分析中... (${i + 1}/${textChunks.length})`);
         
-        // 中間分析: 情報を抽出するだけ (要約として完成させない)
         const analysisPrompt = `
           以下の通話ログから、重要な情報を抽出してください。
 
@@ -341,8 +382,8 @@ const App = () => {
 
           ■出力形式(JSON):
           {
-            "extracted_points": ["ポイント1", "ポイント2", ...],
-            "action_items": [{"task": "...", "assignee": "...", "deadline": "..."}]
+            "summary": ["ポイント1", "ポイント2", ...],
+            "actionItems": [{"task": "...", "assignee": "...", "deadline": "..."}]
           }
 
           【通話ログ(一部)】
@@ -352,13 +393,23 @@ const App = () => {
         try {
           const resultText = await callGeminiDirectly(apiKey, analysisPrompt);
           const cleanJson = resultText.replace(/```json|```/g, '').trim();
-          partialSummaries.push(JSON.parse(cleanJson));
+          // ★修正: extracted_points ではなく summary キーを使うように統一
+          const chunkData = JSON.parse(cleanJson);
+          // 古いプロンプトの名残で extracted_points が返ってきた場合のケア
+          if (chunkData.extracted_points) {
+            chunkData.summary = chunkData.extracted_points;
+            delete chunkData.extracted_points;
+          }
+          if (chunkData.action_items) {
+            chunkData.actionItems = chunkData.action_items;
+          }
+          partialSummaries.push(chunkData);
         } catch (e) {
           console.error(`パート${i+1}の分析エラー:`, e);
         }
       }
 
-      // Phase 3: 最終統合 (重複を排除してまとめる)
+      // Phase 3: 最終統合
       setStatusMessage("最終レポートを作成中...");
       
       const synthesisPrompt = `
@@ -502,7 +553,7 @@ const App = () => {
 
       <main className="max-w-5xl mx-auto px-4 py-8">
         <div className="grid gap-8">
-          {/* 結果表示エリア */}
+          {/* ファイルアップロード等のUI (変更なし) */}
           {!result && !isProcessing && (
             <div className="bg-white rounded-2xl p-8 shadow-sm border border-slate-200 text-center">
               <div className="border-2 border-dashed border-slate-300 rounded-xl p-12 flex flex-col items-center justify-center bg-slate-50 hover:bg-indigo-50 transition-colors cursor-pointer" onDragOver={handleDragOver} onDrop={handleDrop}>
@@ -530,6 +581,8 @@ const App = () => {
               <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-indigo-600 transition-all duration-300" style={{ width: `${progress}%` }}></div></div>
             </div>
           )}
+
+          {/* 結果表示エリア */}
           {result && !isProcessing && (
             <div className="animate-fade-in-up space-y-6">
               <div className="bg-white rounded-2xl p-6 flex flex-col md:flex-row items-center justify-between gap-4">
@@ -540,6 +593,7 @@ const App = () => {
                 <div className="flex space-x-2"><button onClick={resetApp} className="p-2 text-slate-400 hover:bg-slate-100 rounded-lg"><UploadCloud className="w-5 h-5" /></button></div>
                 <audio ref={audioRef} src={fileUrl} onEnded={onAudioEnded} className="hidden" />
               </div>
+              
               <div className="bg-indigo-50 rounded-xl p-4 flex justify-between items-center">
                 <span className="font-semibold text-indigo-800 text-sm">解析結果を活用</span>
                 <div className="flex space-x-3">
@@ -547,6 +601,7 @@ const App = () => {
                   <button onClick={() => handleCalendarIntegration()} className="flex items-center space-x-2 bg-white px-4 py-2 rounded-lg text-sm font-medium"><Calendar className="w-4 h-4 text-green-600" /><span>Calendar</span></button>
                 </div>
               </div>
+
               <div className="grid md:grid-cols-3 gap-6">
                 <div className="md:col-span-1 space-y-4">
                   <div className="bg-white rounded-2xl shadow-sm overflow-hidden">
@@ -564,11 +619,23 @@ const App = () => {
                     </div>
                   )}
                 </div>
+                
                 <div className="md:col-span-2">
                   <div className="bg-white rounded-2xl shadow-sm p-8 min-h-[500px]">
                     {activeTab === 'summary' && result.summary && (
-                      <div><div className="flex justify-between mb-6"><h2 className="text-xl font-bold text-slate-800">要約</h2><button onClick={() => copyToClipboard(Array.isArray(result.summary) ? result.summary.join('\n') : result.summary)}><Copy className="w-4 h-4 text-slate-400" /></button></div><ul className="space-y-4">{Array.isArray(result.summary) ? result.summary.map((point, idx) => (<li key={idx} className="flex items-start"><CheckCircle className="w-5 h-5 text-indigo-500 mr-3 mt-0.5 flex-shrink-0" /><span className="text-slate-700 leading-relaxed whitespace-pre-wrap">{point}</span></li>)) : <p className="text-slate-700 leading-relaxed whitespace-pre-wrap">{result.summary}</p>}</ul></div>
+                      <div>
+                        <div className="flex justify-between mb-6"><h2 className="text-xl font-bold text-slate-800">要約</h2><button onClick={() => copyToClipboard(Array.isArray(result.summary) ? result.summary.join('\n') : result.summary)}><Copy className="w-4 h-4 text-slate-400" /></button></div>
+                        <ul className="space-y-4">
+                          {Array.isArray(result.summary) ? result.summary.map((point, idx) => (
+                            <li key={idx} className="flex items-start">
+                              <CheckCircle className="w-5 h-5 text-indigo-500 mr-3 mt-0.5 flex-shrink-0" />
+                              <span className="text-slate-700 leading-relaxed whitespace-pre-wrap">{point}</span>
+                            </li>
+                          )) : <p className="text-slate-700 leading-relaxed whitespace-pre-wrap">{result.summary}</p>}
+                        </ul>
+                      </div>
                     )}
+                    {/* ★修正: 文字起こしのレイアウト変更（話者名表示の改善） */}
                     {activeTab === 'transcript' && result.transcript && (
                       <div className="flex flex-col h-full">
                         <div className="flex justify-between mb-6">
@@ -578,11 +645,14 @@ const App = () => {
                         <div className="space-y-4 text-slate-700">
                           {parseTranscript(result.transcript).map((item, idx) => (
                             <div key={idx} className="flex space-x-3">
-                              <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${item.speaker.includes('顧客') || item.speaker.includes('様') ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-200 text-slate-600'}`}>
-                                <User className="w-4 h-4" />
+                              {/* アイコンと名前を縦並びにする */}
+                              <div className="flex flex-col items-center mr-1 min-w-[40px]">
+                                <div className={`flex-shrink-0 w-9 h-9 rounded-full flex items-center justify-center ${item.speaker.includes('顧客') ? 'bg-slate-200 text-slate-600' : 'bg-indigo-100 text-indigo-600'}`}>
+                                  <User className="w-5 h-5" />
+                                </div>
+                                <span className="text-[10px] text-slate-500 mt-1 font-medium text-center truncate w-14">{item.speaker}</span>
                               </div>
-                              <div className="flex-1 bg-slate-50 rounded-lg p-3 border border-slate-100">
-                                {item.speaker && <p className="text-xs font-bold text-slate-500 mb-1">{item.speaker}</p>}
+                              <div className="flex-1 bg-slate-50 rounded-lg p-3 border border-slate-100 self-start">
                                 <p className="text-sm leading-relaxed whitespace-pre-wrap">{item.text}</p>
                               </div>
                             </div>
@@ -591,7 +661,25 @@ const App = () => {
                       </div>
                     )}
                     {activeTab === 'action' && result.actionItems && (
-                      <div><h2 className="text-xl font-bold text-slate-800 mb-6">タスク</h2><div className="space-y-4">{result.actionItems.map((item, idx) => (<div key={idx} className="bg-slate-50 rounded-xl p-5 border border-slate-200 flex items-start group cursor-pointer hover:bg-indigo-50 hover:border-indigo-200 transition-all" onClick={() => handleCalendarIntegration(`${item.task} (${item.assignee})`)}><div className="h-6 w-6 rounded border-2 border-slate-300 mr-4 mt-0.5 flex-shrink-0 group-hover:border-indigo-500 transition-colors"></div><div className="flex-1"><p className="font-semibold text-slate-800 mb-1 group-hover:text-indigo-800">{item.task}</p><div className="flex items-center space-x-4 text-sm text-slate-500"><span className="flex items-center"><span className="w-2 h-2 bg-indigo-500 rounded-full mr-2"></span>{item.assignee || "担当者未定"}</span><span className="text-slate-300">|</span><span className="text-orange-600 font-medium">{item.deadline || "期限なし"}</span></div></div><button className="opacity-0 group-hover:opacity-100 p-2 text-slate-400 hover:bg-white hover:text-indigo-600 rounded-lg transition-all shadow-sm"><Calendar className="w-5 h-5" /></button></div>))}</div></div>
+                      <div>
+                        <h2 className="text-xl font-bold text-slate-800 mb-6">タスク</h2>
+                        <div className="space-y-4">
+                          {result.actionItems.map((item, idx) => (
+                            <div key={idx} className="bg-slate-50 rounded-xl p-5 border border-slate-200 flex items-start group cursor-pointer hover:bg-indigo-50 hover:border-indigo-200 transition-all" onClick={() => handleCalendarIntegration(`${item.task} (${item.assignee})`)}>
+                              <div className="h-6 w-6 rounded border-2 border-slate-300 mr-4 mt-0.5 flex-shrink-0 group-hover:border-indigo-500 transition-colors"></div>
+                              <div className="flex-1">
+                                <p className="font-semibold text-slate-800 mb-1 group-hover:text-indigo-800">{item.task}</p>
+                                <div className="flex items-center space-x-4 text-sm text-slate-500">
+                                  <span className="flex items-center"><span className="w-2 h-2 bg-indigo-500 rounded-full mr-2"></span>{item.assignee || "担当者未定"}</span>
+                                  <span className="text-slate-300">|</span>
+                                  <span className="text-orange-600 font-medium">{item.deadline || "期限なし"}</span>
+                                </div>
+                              </div>
+                              <button className="opacity-0 group-hover:opacity-100 p-2 text-slate-400 hover:bg-white hover:text-indigo-600 rounded-lg transition-all shadow-sm"><Calendar className="w-5 h-5" /></button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
                     )}
                   </div>
                 </div>
