@@ -2,10 +2,10 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   UploadCloud, FileAudio, CheckCircle, Play, Pause, Cpu, List, 
   MessageSquare, CalendarCheck, Smile, AlertCircle, Download, 
-  Copy, Trash2, Calendar, FileText, Mail 
+  Copy, Trash2, Calendar, FileText, Mail, Settings, X
 } from 'lucide-react';
 
-// lamejsをCDNから動的に読み込む関数
+// lamejsをCDNから動的に読み込む
 const loadLamejs = () => {
   return new Promise((resolve, reject) => {
     if (window.lamejs) {
@@ -20,7 +20,60 @@ const loadLamejs = () => {
   });
 };
 
-// ファイルをBase64に変換するヘルパー関数
+// Gemini APIを直接呼び出す関数
+const callGeminiDirectly = async (apiKey, promptText, audioBase64 = null) => {
+  if (!apiKey) {
+    throw new Error("APIキーが設定されていません。画面右上の「設定」からGoogle APIキーを入力してください。");
+  }
+
+  const modelName = "gemini-2.0-flash";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+
+  const contents = [{
+    parts: [
+      { text: promptText }
+    ]
+  }];
+
+  if (audioBase64) {
+    contents[0].parts.push({
+      inline_data: {
+        mime_type: "audio/mp3",
+        data: audioBase64
+      }
+    });
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: contents,
+      generationConfig: {
+        response_mime_type: "application/json",
+        max_output_tokens: 8192
+      }
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    // APIキーが無効な場合のエラーハンドリング
+    if (response.status === 400 && errorText.includes("API_KEY_INVALID")) {
+      throw new Error("APIキーが無効です。正しいキーが設定されているか確認してください。");
+    }
+    throw new Error(`Gemini API Error: ${response.status} - ${errorText}`);
+  }
+
+  const result = await response.json();
+  const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+  
+  if (!text) throw new Error("AIからの応答が空でした。");
+
+  return text;
+};
+
+// Base64変換
 const fileToBase64 = (file) => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -34,7 +87,7 @@ const fileToBase64 = (file) => {
   });
 };
 
-// 音声を指定範囲で切り出し、軽量MP3に圧縮する関数
+// 音声圧縮
 const processAudioChunk = async (file, startTime = 0, duration = null) => {
   try {
     await loadLamejs();
@@ -101,12 +154,9 @@ const processAudioChunk = async (file, startTime = 0, duration = null) => {
   }
 };
 
-// ★追加: テキストを指定文字数で分割する関数（タイムアウト回避用）
-const splitTextIntoChunks = (text, maxLength = 3500) => {
+const splitTextIntoChunks = (text, maxLength = 7000) => {
   const chunks = [];
   let currentChunk = "";
-  
-  // 改行単位で分割して、文字数制限を超えないように結合していく
   const lines = text.split(/\n/);
 
   for (const line of lines) {
@@ -123,7 +173,6 @@ const splitTextIntoChunks = (text, maxLength = 3500) => {
   return chunks;
 };
 
-// ★追加: 分割された分析結果を統合する関数
 const mergeAnalysisResults = (results) => {
   const merged = {
     summary: [],
@@ -136,30 +185,17 @@ const mergeAnalysisResults = (results) => {
   let validScoreCount = 0;
 
   results.forEach(res => {
-    // 要約の結合
-    if (res.summary && Array.isArray(res.summary)) {
-      merged.summary.push(...res.summary);
-    }
-    // タスクの結合
-    if (res.actionItems && Array.isArray(res.actionItems)) {
-      merged.actionItems.push(...res.actionItems);
-    }
-    // 感情スコアの集計
+    if (res.summary && Array.isArray(res.summary)) merged.summary.push(...res.summary);
+    if (res.actionItems && Array.isArray(res.actionItems)) merged.actionItems.push(...res.actionItems);
     if (typeof res.sentimentScore === 'number') {
       totalScore += res.sentimentScore;
       validScoreCount++;
     }
   });
 
-  // 感情スコアの平均化
   const avgScore = validScoreCount > 0 ? totalScore / validScoreCount : 0.5;
   merged.sentimentScore = avgScore;
-  
-  if (avgScore >= 0.6) merged.sentiment = "Positive";
-  else if (avgScore <= 0.4) merged.sentiment = "Negative";
-  else merged.sentiment = "Neutral";
-
-  // 重複の削除 (完全一致のみ)
+  merged.sentiment = avgScore >= 0.6 ? "Positive" : avgScore <= 0.4 ? "Negative" : "Neutral";
   merged.summary = [...new Set(merged.summary)];
   
   return merged;
@@ -175,6 +211,21 @@ const App = () => {
   const audioRef = useRef(null);
   const [activeTab, setActiveTab] = useState('summary');
   const [statusMessage, setStatusMessage] = useState("");
+  
+  // APIキー管理
+  const [apiKey, setApiKey] = useState("");
+  const [showSettings, setShowSettings] = useState(false);
+
+  useEffect(() => {
+    const storedKey = localStorage.getItem('google_api_key');
+    if (storedKey) setApiKey(storedKey);
+  }, []);
+
+  const saveApiKey = () => {
+    localStorage.setItem('google_api_key', apiKey);
+    setShowSettings(false);
+    alert("APIキーを保存しました。");
+  };
 
   const handleFileChange = (e) => {
     const selectedFile = e.target.files[0];
@@ -184,9 +235,7 @@ const App = () => {
   const handleDragOver = (e) => e.preventDefault();
   const handleDrop = (e) => {
     e.preventDefault();
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      processFile(e.dataTransfer.files[0]);
-    }
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) processFile(e.dataTransfer.files[0]);
   };
 
   const processFile = (selectedFile) => {
@@ -202,53 +251,49 @@ const App = () => {
 
   const startProcessing = async () => {
     if (!file) return;
+    if (!apiKey) {
+      setShowSettings(true);
+      alert("解析を行うには、設定からGoogle APIキーを入力してください。");
+      return;
+    }
+
     setIsProcessing(true);
     setProgress(5);
     setStatusMessage("準備中...");
 
     try {
-      // 分割設定 (10分 = 600秒)
       const CHUNK_DURATION = 600; 
       let fullTranscript = "";
       let currentStartTime = 0;
       let chunkCount = 1;
       let isFinished = false;
 
-      // --- Phase 1: 音声分割と文字起こし ---
+      // Phase 1: 文字起こし
       while (!isFinished) {
         setStatusMessage(`音声処理中... (パート ${chunkCount})`);
-        
         const processed = await processAudioChunk(file, currentStartTime, CHUNK_DURATION);
         
-        if (!processed || processed.blob.size === 0) {
-          break;
-        }
-
-        if (processed.blob.size > 4.5 * 1024 * 1024) {
-          throw new Error(`分割後のサイズ(${ (processed.blob.size/1024/1024).toFixed(1) }MB)が大きすぎます。`);
-        }
+        if (!processed || processed.blob.size === 0) break;
 
         setStatusMessage(`パート ${chunkCount} を文字起こし中...`);
         setProgress(10 + (chunkCount * 5)); 
 
         const audioBase64 = await fileToBase64(processed.blob);
 
-        const response = await fetch('/.netlify/functions/analyze', {
-          method: 'POST',
-          body: JSON.stringify({ 
-            audioBase64,
-            mode: "transcript" 
-          }),
-          headers: { 'Content-Type': 'application/json' }
-        });
+        const transcriptPrompt = `
+          以下の音声ファイルを聞き取り、会話内容をすべて文字起こししてください。
+          発言者ごとに改行し、「アイキャット担当者（金子,高島,川越,澤田,上田）」と「顧客」を区別し、名前がわかる場合は "名前: 発言" の形式にしてください。
+          余計な前置きや挨拶は不要です。
+        `;
 
-        if (!response.ok) {
-          throw new Error(`パート ${chunkCount} の解析に失敗: ${response.statusText}`);
-        }
-
-        const data = await response.json();
-        if (data.transcript) {
-          fullTranscript += data.transcript + "\n";
+        const transcriptText = await callGeminiDirectly(apiKey, transcriptPrompt, audioBase64);
+        
+        try {
+            const json = JSON.parse(transcriptText);
+            if (json.transcript) fullTranscript += json.transcript + "\n";
+            else fullTranscript += transcriptText + "\n";
+        } catch (e) {
+            fullTranscript += transcriptText + "\n";
         }
 
         if (processed.isEnd) {
@@ -259,69 +304,82 @@ const App = () => {
         }
       }
 
-      setStatusMessage("要約を生成中... (分割処理)");
+      setStatusMessage("要約を生成中...");
       setProgress(90);
 
-      if (!fullTranscript.trim()) {
-        throw new Error("文字起こしが生成されませんでした。");
-      }
+      if (!fullTranscript.trim()) throw new Error("文字起こしが生成されませんでした。");
 
-      // --- Phase 2: 分割要約処理 (Map-Reduce) ---
-      // タイムアウトを防ぐため、長いテキストを3000文字ごとに分割して個別に要約リクエストを送る
-      const textChunks = splitTextIntoChunks(fullTranscript, 3000);
+      // Phase 2: 要約
+      const textChunks = splitTextIntoChunks(fullTranscript, 6000);
       const partialResults = [];
 
       for (let i = 0; i < textChunks.length; i++) {
         const chunk = textChunks[i];
         setStatusMessage(`要約生成中... (${i + 1}/${textChunks.length})`);
         
-        try {
-          const summaryResponse = await fetch('/.netlify/functions/analyze', {
-            method: 'POST',
-            body: JSON.stringify({ 
-              transcriptText: chunk,
-              mode: "summary" 
-            }),
-            headers: { 'Content-Type': 'application/json' }
-          });
+        const analysisPrompt = `
+          あなたは優秀な秘書です。以下の【通話ログ】を分析し、JSON形式で出力してください。
 
-          if (summaryResponse.ok) {
-            const chunkData = await summaryResponse.json();
-            partialResults.push(chunkData);
-          } else {
-            console.warn(`パート${i+1}の要約に失敗: ${summaryResponse.statusText}`);
+          ■製品リスト
+          [インプラント関連] LANDmarker, LANDmark Guide, LANDmark Crown
+          [CT画像関連] NewTom GO, NewTom GiANO, NewTom VGi evo, RevoluX, PSピックス, X-VS, SOPRO717 ファースト, Good Dr's
+          [アプリ] PerioDx, QUON Perio, PaTaKaRUSH
+          [その他] Form3B+, FlashMax460
+
+          ■要約テンプレート
+          【対象製品】上記リストの中で話題に出た製品名（なければ「なし」）
+          【目的】通話の主な目的
+          【背景】現在の状況や経緯
+          【質問・課題】具体的な質問内容や相談事項
+          【希望・要望】相手に求めている対応
+
+          ■出力フォーマット(JSONのみ):
+          {
+            "summary": ["【対象製品】...", "【目的】...", "【背景】...", "【質問・課題】...", "【希望・要望】..."],
+            "actionItems": [{"task": "...", "assignee": "...", "deadline": "..."}],
+            "sentiment": "Positive/Neutral/Negative",
+            "sentimentScore": 0.8
           }
+
+          【通話ログ】
+          ${chunk}
+        `;
+
+        try {
+          const resultText = await callGeminiDirectly(apiKey, analysisPrompt);
+          const cleanJson = resultText.replace(/```json|```/g, '').trim();
+          const chunkData = JSON.parse(cleanJson);
+          partialResults.push(chunkData);
         } catch (e) {
           console.error(`パート${i+1}の要約エラー:`, e);
         }
       }
 
+      let finalData;
       if (partialResults.length === 0) {
-        // 全て失敗した場合は文字起こしのみ表示
-        alert("要約の生成に失敗しました（タイムアウト）。\n文字起こし結果のみ表示します。");
-        setResult({
-          transcript: fullTranscript,
+        alert("要約の生成に失敗しました。\n文字起こし結果のみ表示します。");
+        finalData = {
           summary: ["(要約生成失敗)"],
           actionItems: [],
           sentimentScore: 0.5
-        });
+        };
         setActiveTab('transcript');
       } else {
-        // 結果の統合
-        const finalData = mergeAnalysisResults(partialResults);
-        setResult({
-          ...finalData,
-          transcript: fullTranscript
-        });
+        finalData = mergeAnalysisResults(partialResults);
         setActiveTab('summary');
       }
+
+      setResult({
+        ...finalData,
+        transcript: fullTranscript
+      });
 
       setProgress(100);
       setStatusMessage("完了");
       
     } catch (error) {
       console.error('Error:', error);
-      alert('解析中にエラーが発生しました: ' + error.message);
+      alert('エラー: ' + error.message);
       setProgress(0);
       setStatusMessage("エラー発生");
     } finally {
@@ -337,7 +395,6 @@ const App = () => {
     }
   };
   const onAudioEnded = () => setIsPlaying(false);
-  
   const copyToClipboard = (text) => { navigator.clipboard.writeText(text); alert("コピーしました"); };
   
   const handleDocsIntegration = () => {
@@ -357,16 +414,60 @@ const App = () => {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 font-sans selection:bg-indigo-100 selection:text-indigo-800">
-      {/* ヘッダー */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-10">
         <div className="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
           <div className="flex items-center space-x-2">
             <div className="bg-indigo-600 p-2 rounded-lg"><Cpu className="w-5 h-5 text-white" /></div>
             <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-600 to-violet-600">VoiceNote AI</h1>
           </div>
-          <div className="flex items-center space-x-4"><span className="text-xs text-slate-400 hidden sm:inline">連携済み: Google Workspace</span></div>
+          <div className="flex items-center space-x-4">
+            <button 
+              onClick={() => setShowSettings(true)}
+              className="text-sm font-medium text-slate-500 hover:text-indigo-600 transition-colors flex items-center gap-1"
+            >
+              <Settings className="w-4 h-4" /> 設定
+            </button>
+          </div>
         </div>
       </header>
+
+      {/* 設定モーダル */}
+      {showSettings && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 animate-fade-in">
+          <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-2xl relative">
+            <button 
+              onClick={() => setShowSettings(false)}
+              className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <h2 className="text-xl font-bold text-slate-800 mb-4 flex items-center">
+              <Settings className="w-5 h-5 mr-2 text-indigo-600" />
+              API設定
+            </h2>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Google API Key</label>
+                <input 
+                  type="password" 
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                  placeholder="AIza..."
+                />
+                <p className="text-xs text-slate-500 mt-1">Google AI Studioで取得したキーを入力してください。</p>
+              </div>
+              <button 
+                onClick={saveApiKey}
+                className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-lg font-bold transition-colors"
+              >
+                保存する
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <main className="max-w-5xl mx-auto px-4 py-8">
         <div className="grid gap-8">
           {!result && !isProcessing && (
@@ -460,3 +561,13 @@ const App = () => {
 };
 
 export default App;
+```
+
+### 変更の反映手順
+
+ファイルを保存した後、以下のコマンドを実行してNetlifyへデプロイしてください。
+
+```bash
+git add src/App.jsx
+git commit -m "Add API Key settings UI and switch to direct API call"
+git push origin main
