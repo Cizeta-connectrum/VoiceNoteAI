@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 
 // lamejsをCDNから動的に読み込む関数
+// ビルドエラーを防ぐため、importではなく動的ロードを使用します
 const loadLamejs = () => {
   return new Promise((resolve, reject) => {
     if (window.lamejs) {
@@ -13,7 +14,7 @@ const loadLamejs = () => {
       return;
     }
     const script = document.createElement('script');
-    // ★修正: 確実に存在するURLに変更 (unpkg.comのlame.all.jsを使用)
+    // 確実に存在するURL (unpkg.com) を使用
     script.src = 'https://unpkg.com/lamejs@1.2.1/lame.all.js';
     script.onload = () => resolve(window.lamejs);
     script.onerror = () => reject(new Error('Failed to load lamejs library'));
@@ -212,25 +213,44 @@ const App = () => {
         throw new Error("文字起こしが生成されませんでした。");
       }
 
-      const summaryResponse = await fetch('/.netlify/functions/analyze', {
-        method: 'POST',
-        body: JSON.stringify({ 
-          transcriptText: fullTranscript,
-          mode: "summary" 
-        }),
-        headers: { 'Content-Type': 'application/json' }
-      });
+      // 要約処理
+      let finalData = {
+        summary: ["(要約の生成に時間がかかりすぎたため、文字起こしのみ表示します)"],
+        actionItems: [],
+        sentiment: "Neutral",
+        sentimentScore: 0.5
+      };
 
-      if (!summaryResponse.ok) {
-        throw new Error(`要約生成に失敗: ${summaryResponse.statusText}`);
+      try {
+        const summaryResponse = await fetch('/.netlify/functions/analyze', {
+          method: 'POST',
+          body: JSON.stringify({ 
+            transcriptText: fullTranscript,
+            mode: "summary" 
+          }),
+          headers: { 'Content-Type': 'application/json' }
+        });
+
+        if (!summaryResponse.ok) {
+          console.warn(`要約生成APIエラー: ${summaryResponse.statusText}`);
+          alert("要約の生成に失敗しました（タイムアウト）。\n文字起こし結果のみ表示します。");
+        } else {
+          finalData = await summaryResponse.json();
+        }
+      } catch (summaryError) {
+        console.error("要約生成エラー:", summaryError);
+        alert("要約の生成中にエラーが発生しました。\n文字起こし結果のみ表示します。");
       }
 
-      const finalData = await summaryResponse.json();
-      
+      // 結果を統合
       setResult({
         ...finalData,
         transcript: fullTranscript
       });
+
+      if (finalData.summary[0].includes("失敗")) {
+        setActiveTab('transcript');
+      }
 
       setProgress(100);
       setStatusMessage("完了");
