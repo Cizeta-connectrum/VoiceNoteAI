@@ -4,7 +4,8 @@ import {
   MessageSquare, CalendarCheck, Smile, AlertCircle, Download, 
   Copy, Trash2, Calendar, FileText, Mail 
 } from 'lucide-react';
-import lamejs from 'lamejs'; // ★修正: default importに変更
+// lamejsのインポート互換性を確保
+import * as lamejs from 'lamejs';
 
 // ファイルをBase64に変換するヘルパー関数
 const fileToBase64 = (file) => {
@@ -12,7 +13,6 @@ const fileToBase64 = (file) => {
     const reader = new FileReader();
     reader.readAsDataURL(file);
     reader.onload = () => {
-      // "data:audio/mp3;base64,..." の先頭部分を削除して純粋なBase64だけにする
       const result = reader.result;
       const base64String = result.includes(',') ? result.split(',')[1] : result;
       resolve(base64String);
@@ -21,26 +21,30 @@ const fileToBase64 = (file) => {
   });
 };
 
-// 音声を軽量MP3に圧縮する関数 (16kHz, Mono, 32kbps)
+// 音声を軽量MP3に圧縮する関数
 const compressAudio = async (file) => {
   try {
     console.log("圧縮開始:", file.name, file.size);
     const arrayBuffer = await file.arrayBuffer();
-    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    const audioContext = new AudioContext();
     
     // デコード処理
     let audioBuffer;
     try {
       audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
     } catch (decodeErr) {
-      throw new Error("音声ファイルのデコードに失敗しました。壊れているか非対応の形式です。");
+      throw new Error("音声ファイルのデコードに失敗しました。ファイルが壊れているか、ブラウザが対応していない形式です。");
     }
 
-    // リサンプリング (16kHz) とモノラル化
+    // ★修正: 長時間ファイル対策としてサンプリングレートを調整
+    // Geminiは16kHz推奨ですが、容量削減のため長時間ファイルは少し落とすことも検討
+    // ここでは標準的な16kHzを採用しつつ、モノラル化で容量を削ります
     const targetSampleRate = 16000;
-    // OfflineAudioContextの作成（長さ制限への対策）
     const duration = audioBuffer.duration;
-    const offlineContext = new OfflineAudioContext(1, duration * targetSampleRate, targetSampleRate);
+    
+    const OfflineContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    const offlineContext = new OfflineContext(1, duration * targetSampleRate, targetSampleRate);
     
     const source = offlineContext.createBufferSource();
     source.buffer = audioBuffer;
@@ -50,16 +54,20 @@ const compressAudio = async (file) => {
     const renderedBuffer = await offlineContext.startRendering();
     const pcmData = renderedBuffer.getChannelData(0);
     
-    // MP3エンコード (lamejs)
     const samples = new Int16Array(pcmData.length);
     for (let i = 0; i < pcmData.length; i++) {
-      // クッピング対策を含めた変換
       let s = Math.max(-1, Math.min(1, pcmData[i]));
       samples[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
     }
 
-    // ★修正: lamejsのインスタンス化を修正
-    const mp3encoder = new lamejs.Mp3Encoder(1, targetSampleRate, 32); // 32kbps
+    // ライブラリの読み込み互換性チェック
+    const Mp3Encoder = lamejs.Mp3Encoder || (lamejs.default && lamejs.default.Mp3Encoder);
+    if (!Mp3Encoder) {
+      throw new Error("圧縮ライブラリ(lamejs)のロードに失敗しました。");
+    }
+
+    // ★修正: ビットレートを32kbpsに設定（音声認識にはこれでも十分）
+    const mp3encoder = new Mp3Encoder(1, targetSampleRate, 32); 
     const mp3Data = [];
     const sampleBlockSize = 1152;
     
@@ -78,7 +86,7 @@ const compressAudio = async (file) => {
 
   } catch (e) {
     console.error("圧縮プロセスエラー:", e);
-    throw e; // エラーを呼び出し元に伝播
+    throw e;
   }
 };
 
@@ -126,16 +134,16 @@ const App = () => {
     try {
       let uploadFile = file;
 
-      // 圧縮が必要かチェック (4MB以上なら圧縮を試みる)
-      const COMPRESSION_THRESHOLD = 4 * 1024 * 1024;
-      const ABSOLUTE_LIMIT = 5.8 * 1024 * 1024; // Netlify制限ギリギリ
+      // ★修正: Netlify制限(6MB)を考慮し、Base64増加分(x1.33)を引いた安全圏を設定
+      // 4.2MBを超えると危険域
+      const COMPRESSION_THRESHOLD = 3.5 * 1024 * 1024; // 3.5MB以上なら圧縮試行
+      const ABSOLUTE_LIMIT = 4.2 * 1024 * 1024; // 4.2MB以上は送信不可
 
       if (file.size > COMPRESSION_THRESHOLD) {
         setStatusMessage("ファイルサイズが大きいため圧縮しています...");
         try {
           const compressed = await compressAudio(file);
           
-          // 圧縮成功かつサイズが小さくなっていれば採用
           if (compressed.size < file.size) {
             uploadFile = compressed;
             setStatusMessage(`圧縮完了: ${(file.size/1024/1024).toFixed(1)}MB → ${(uploadFile.size/1024/1024).toFixed(1)}MB`);
@@ -144,19 +152,18 @@ const App = () => {
           }
         } catch (e) {
           console.warn("圧縮に失敗しました:", e);
-          // 圧縮に失敗しても、元のファイルがギリギリ送れるサイズなら続行する
           if (file.size < ABSOLUTE_LIMIT) {
              setStatusMessage("圧縮に失敗しましたが、そのまま送信を試みます...");
-             uploadFile = file; // 元のファイルを使う
+             uploadFile = file;
           } else {
-             throw new Error(`音声ファイルの圧縮に失敗し、元のサイズ(${ (file.size/1024/1024).toFixed(1) }MB)も大きすぎるため送信できません。`);
+             throw new Error(`音声圧縮に失敗し、元のサイズ(${ (file.size/1024/1024).toFixed(1) }MB)も送信制限を超えています。`);
           }
         }
       }
 
-      // 最終チェック
+      // 最終サイズチェック
       if (uploadFile.size > ABSOLUTE_LIMIT) {
-        throw new Error(`送信ファイルサイズ(${ (uploadFile.size/1024/1024).toFixed(1) }MB)が制限を超えています。より短い音声を使用してください。`);
+        throw new Error(`送信サイズが大きすぎます(${ (uploadFile.size/1024/1024).toFixed(1) }MB)。\nNetlifyの制限により送信できません。\nもっと短い音声に分割してください。`);
       }
 
       setProgress(20);
@@ -174,7 +181,15 @@ const App = () => {
       });
 
       if (!response.ok) {
-        let errorMessage = `サーバーエラー: ${response.statusText}`;
+        // ステータスコードに応じたエラーメッセージ
+        if (response.status === 413) {
+          throw new Error("ファイルサイズが大きすぎます (413 Payload Too Large)。");
+        }
+        if (response.status === 504 || response.status === 502) {
+          throw new Error("処理がタイムアウトしました。音声が長すぎる可能性があります。");
+        }
+
+        let errorMessage = `サーバーエラー: ${response.status} ${response.statusText}`;
         try {
           const errorData = await response.json();
           if (errorData.error) errorMessage += ` (${errorData.error})`;
@@ -248,7 +263,7 @@ const App = () => {
                     <UploadCloud className="w-16 h-16 text-indigo-500 mb-4" />
                     <h3 className="text-lg font-bold text-slate-700 mb-2">音声ファイルをドロップ</h3>
                     <label className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2.5 rounded-full cursor-pointer">ファイルを選択<input type="file" className="hidden" accept="audio/*" onChange={handleFileChange} /></label>
-                    <p className="mt-4 text-xs text-slate-400">自動圧縮機能付き (長時間ファイル対応)</p>
+                    <p className="mt-4 text-xs text-slate-400">自動圧縮機能付き (対応: mp3, wav, m4a)</p>
                   </>
                 ) : (
                   <div className="w-full max-w-md">
@@ -331,5 +346,3 @@ const App = () => {
 };
 
 export default App;
-
-
