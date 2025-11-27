@@ -17,8 +17,9 @@ export const handler = async (event, context) => {
       return { statusCode: 500, body: JSON.stringify({ error: "API Key is missing in environment variables" }) };
     }
 
-    // デバッグ情報に基づき、利用可能なモデル（gemini-2.5-flash）に変更します
-    const modelName = "gemini-2.5-flash"; 
+    // 503エラー（混雑）回避のため、gemini-2.5-flash から gemini-2.0-flash に変更
+    // ※もし2.0も混雑している場合は "gemini-flash-latest" を試してください
+    const modelName = "gemini-2.0-flash"; 
 
     const promptText = `
       あなたは優秀な秘書です。以下の音声データを分析し、結果を必ずJSON形式のみで出力してください。
@@ -62,13 +63,12 @@ export const handler = async (event, context) => {
     if (!response.ok) {
       const errorText = await response.text();
       
-      // ★デバッグ用: 404エラーの場合、使えるモデルの一覧を取得して表示する
+      // ★デバッグ用: エラー時のモデル一覧取得ロジック（そのまま残します）
       let debugInfo = "";
       if (response.status === 404) {
         try {
           const listResp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
           const listData = await listResp.json();
-          // 利用可能なモデル名を抽出してエラーメッセージに追加
           const availableModels = listData.models ? listData.models.map(m => m.name) : "取得できませんでした";
           debugInfo = `\n【デバッグ情報】あなたのAPIキーで利用可能なモデル一覧:\n${JSON.stringify(availableModels, null, 2)}`;
         } catch (e) {
