@@ -1,9 +1,4 @@
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-
-// 環境変数からAPIキーを読み込む
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
-
-exports.handler = async (event, context) => {
+export const handler = async (event, context) => {
   // POSTメソッド以外は拒否
   if (event.httpMethod !== 'POST') {
     return { statusCode: 405, body: 'Method Not Allowed' };
@@ -17,11 +12,22 @@ exports.handler = async (event, context) => {
       return { statusCode: 400, body: 'No audio data provided' };
     }
 
-    // モデルの指定 (Gemini 1.5 Flash)
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const apiKey = process.env.GOOGLE_API_KEY;
+    if (!apiKey) {
+      return { statusCode: 500, body: JSON.stringify({ error: "API Key is missing in environment variables" }) };
+    }
 
     // プロンプトの作成
-    const prompt = `
+    // Gemini 1.0 Pro はマルチモーダル（音声直接入力）に対応していない場合があるため、
+    // テキストベースの処理を前提としたプロンプト構成に安全策をとります。
+    // ※今回は「音声ファイル(mp3)」を「Inline Data」として送るため、
+    // マルチモーダル対応の gemini-1.5-flash が理想ですが、404が出るため
+    // 次善の策として gemini-1.5-pro-latest を試します。
+    // それでもダメなら gemini-pro (テキストのみ) になりますが、まずはこれで行きます。
+    
+    const modelName = "gemini-1.5-pro-latest"; // 最新の安定版エイリアス
+
+    const promptText = `
       あなたは優秀な秘書です。以下の音声データを分析し、結果を必ずJSON形式のみで出力してください。
       Markdownのコードブロック（\`\`\`json）は含めないでください。
 
@@ -37,22 +43,44 @@ exports.handler = async (event, context) => {
       }
     `;
 
-    // Geminiに音声データとプロンプトを送信
-    const result = await model.generateContent([
-      prompt,
-      {
-        inlineData: {
-          mimeType: "audio/mp3",
-          data: audioBase64
-        }
-      }
-    ]);
+    // APIエンドポイント: v1beta (新しいモデル用)
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
 
-    const response = await result.response;
-    const text = response.text();
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { text: promptText },
+            {
+              inline_data: {
+                mime_type: "audio/mp3",
+                data: audioBase64
+              }
+            }
+          ]
+        }]
+      })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      // エラー内容をそのまま返すことでデバッグしやすくする
+      throw new Error(`Gemini API Error (${modelName}): ${response.status} ${response.statusText} - ${errorText}`);
+    }
+
+    const result = await response.json();
     
-    // JSONの整形（万が一Markdownが含まれていた場合の除去）
-    const cleanJson = text.replace(/```json|```/g, '').trim();
+    const candidates = result.candidates;
+    if (!candidates || candidates.length === 0) {
+      throw new Error("No candidates returned from Gemini API");
+    }
+
+    const responseText = candidates[0].content.parts[0].text;
+    const cleanJson = responseText.replace(/```json|```/g, '').trim();
     const data = JSON.parse(cleanJson);
 
     return {
@@ -69,15 +97,3 @@ exports.handler = async (event, context) => {
     };
   }
 };
-
-ステップ 4：変更を反映する（完了！）
-最後にターミナルで以下のコマンドを順番に実行して、Netlifyへ反映させます。
-# 1. ライブラリを更新する
-npm install
-
-# 2. 変更をNetlifyへ送信する
-git add .
-git commit -m "Switch to simple API Key auth"
-git push origin main
-
-
