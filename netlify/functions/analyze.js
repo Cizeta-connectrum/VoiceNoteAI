@@ -25,6 +25,11 @@ export const handler = async (event, context) => {
     const promptText = `
       あなたは優秀な秘書です。以下の音声データを分析し、結果を必ずJSON形式のみで出力してください。
       Markdownのコードブロック（\`\`\`json）は含めないでください。
+      
+      【重要】
+      - 出力は純粋なJSON文字列のみにしてください。
+      - JSON内の文字列に改行を含める場合は、必ず "\\n" とエスケープしてください。
+      - 制御文字（タブや生の改行など）を文字列値の中に含めないでください。
 
       特に「summary」フィールドは、通話内容から以下の情報を抽出し、配列形式で整理してください。
       該当する情報がない場合は「不明」または「なし」としてください。
@@ -102,8 +107,33 @@ export const handler = async (event, context) => {
     }
 
     const responseText = candidates[0].content.parts[0].text;
-    const cleanJson = responseText.replace(/```json|```/g, '').trim();
-    const data = JSON.parse(cleanJson);
+    
+    // JSON整形・クリーニング処理の強化
+    // 1. Markdown記法を削除
+    let cleanJson = responseText.replace(/```json|```/g, '').trim();
+    
+    // 2. { ... } の範囲だけを確実に抽出（前後の余計な文字を削除）
+    const firstBrace = cleanJson.indexOf('{');
+    const lastBrace = cleanJson.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace !== -1) {
+      cleanJson = cleanJson.substring(firstBrace, lastBrace + 1);
+    }
+
+    // 3. JSONパース実行（失敗時の詳細ログ出力付き）
+    let data;
+    try {
+      data = JSON.parse(cleanJson);
+    } catch (parseError) {
+      console.error("JSON Parse Error Raw Text:", cleanJson);
+      // 制御文字が含まれている場合の救済措置（簡易的なサニタイズ）
+      try {
+        // 制御文字（0x00-0x1F）を除去して再トライ
+        const sanitized = cleanJson.replace(/[\u0000-\u001F]+/g, "");
+        data = JSON.parse(sanitized);
+      } catch (retryError) {
+        throw new Error(`AIの応答が正しいJSON形式ではありませんでした: ${parseError.message}`);
+      }
+    }
 
     return {
       statusCode: 200,
