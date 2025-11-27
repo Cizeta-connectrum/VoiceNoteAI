@@ -17,15 +17,8 @@ export const handler = async (event, context) => {
       return { statusCode: 500, body: JSON.stringify({ error: "API Key is missing in environment variables" }) };
     }
 
-    // プロンプトの作成
-    // Gemini 1.0 Pro はマルチモーダル（音声直接入力）に対応していない場合があるため、
-    // テキストベースの処理を前提としたプロンプト構成に安全策をとります。
-    // ※今回は「音声ファイル(mp3)」を「Inline Data」として送るため、
-    // マルチモーダル対応の gemini-1.5-flash が理想ですが、404が出るため
-    // 次善の策として gemini-1.5-pro-latest を試します。
-    // それでもダメなら gemini-pro (テキストのみ) になりますが、まずはこれで行きます。
-    
-    const modelName = "gemini-1.5-pro-latest"; // 最新の安定版エイリアス
+    // まずは標準的な gemini-1.5-flash を試します
+    const modelName = "gemini-1.5-flash"; 
 
     const promptText = `
       あなたは優秀な秘書です。以下の音声データを分析し、結果を必ずJSON形式のみで出力してください。
@@ -43,7 +36,7 @@ export const handler = async (event, context) => {
       }
     `;
 
-    // APIエンドポイント: v1beta (新しいモデル用)
+    // APIエンドポイント: v1beta
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
 
     const response = await fetch(url, {
@@ -68,8 +61,22 @@ export const handler = async (event, context) => {
 
     if (!response.ok) {
       const errorText = await response.text();
-      // エラー内容をそのまま返すことでデバッグしやすくする
-      throw new Error(`Gemini API Error (${modelName}): ${response.status} ${response.statusText} - ${errorText}`);
+      
+      // ★デバッグ用: 404エラーの場合、使えるモデルの一覧を取得して表示する
+      let debugInfo = "";
+      if (response.status === 404) {
+        try {
+          const listResp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+          const listData = await listResp.json();
+          // 利用可能なモデル名を抽出してエラーメッセージに追加
+          const availableModels = listData.models ? listData.models.map(m => m.name) : "取得できませんでした";
+          debugInfo = `\n【デバッグ情報】あなたのAPIキーで利用可能なモデル一覧:\n${JSON.stringify(availableModels, null, 2)}`;
+        } catch (e) {
+          debugInfo = "\n(モデル一覧の取得にも失敗しました)";
+        }
+      }
+
+      throw new Error(`Gemini API Error: ${response.status} ${response.statusText} - ${errorText}${debugInfo}`);
     }
 
     const result = await response.json();
@@ -91,9 +98,13 @@ export const handler = async (event, context) => {
 
   } catch (error) {
     console.error('Error:', error);
+    // エラーの詳細を画面（フロントエンド）に返す
     return {
       statusCode: 500,
-      body: JSON.stringify({ error: error.message, details: error.toString() }),
+      body: JSON.stringify({ 
+        error: "解析に失敗しました", 
+        details: error.message 
+      }),
     };
   }
 };
