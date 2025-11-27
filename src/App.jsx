@@ -5,7 +5,7 @@ import {
   Copy, Trash2, Calendar, FileText, Mail, Settings, X
 } from 'lucide-react';
 
-// lamejsをCDNから動的に読み込む
+// lamejsをCDNから動的に読み込む関数
 const loadLamejs = () => {
   return new Promise((resolve, reject) => {
     if (window.lamejs) {
@@ -20,7 +20,7 @@ const loadLamejs = () => {
   });
 };
 
-// Gemini APIを直接呼び出す関数
+// Gemini APIを直接呼び出す関数 (バックエンドを経由しない)
 const callGeminiDirectly = async (apiKey, promptText, audioBase64 = null) => {
   if (!apiKey) {
     throw new Error("APIキーが設定されていません。画面右上の「設定」からGoogle APIキーを入力してください。");
@@ -87,7 +87,7 @@ const fileToBase64 = (file) => {
   });
 };
 
-// 音声圧縮
+// 音声を指定範囲で切り出し、軽量MP3に圧縮する関数
 const processAudioChunk = async (file, startTime = 0, duration = null) => {
   try {
     await loadLamejs();
@@ -561,13 +561,3 @@ const App = () => {
 };
 
 export default App;
-```
-
-### 変更の反映手順
-
-ファイルを保存した後、以下のコマンドを実行してNetlifyへデプロイしてください。
-
-```bash
-git add src/App.jsx
-git commit -m "Add API Key settings UI and switch to direct API call"
-git push origin main
