@@ -4,7 +4,7 @@ import {
   MessageSquare, CalendarCheck, Smile, AlertCircle, Download, 
   Copy, Trash2, Calendar, FileText, Mail 
 } from 'lucide-react';
-import * as lamejs from 'lamejs';
+import { Mp3Encoder } from 'lamejs'; // ★修正: より確実なインポート方法に変更
 
 // ファイルをBase64に変換するヘルパー関数
 const fileToBase64 = (file) => {
@@ -26,7 +26,6 @@ const compressAudio = async (file) => {
     const audioContext = new (window.AudioContext || window.webkitAudioContext)();
     const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
 
-    // リサンプリング (16kHz) とモノラル化
     const targetSampleRate = 16000;
     const offlineContext = new OfflineAudioContext(1, audioBuffer.duration * targetSampleRate, targetSampleRate);
     
@@ -38,15 +37,14 @@ const compressAudio = async (file) => {
     const renderedBuffer = await offlineContext.startRendering();
     const pcmData = renderedBuffer.getChannelData(0);
     
-    // MP3エンコード (lamejs)
-    // Float32 -> Int16 変換
     const samples = new Int16Array(pcmData.length);
     for (let i = 0; i < pcmData.length; i++) {
       let s = Math.max(-1, Math.min(1, pcmData[i]));
       samples[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
     }
 
-    const mp3encoder = new lamejs.Mp3Encoder(1, targetSampleRate, 32); // 32kbpsで圧縮
+    // ★修正: Mp3Encoder を直接使用
+    const mp3encoder = new Mp3Encoder(1, targetSampleRate, 32);
     const mp3Data = [];
     const sampleBlockSize = 1152;
     
@@ -59,9 +57,7 @@ const compressAudio = async (file) => {
     const mp3buf = mp3encoder.flush();
     if (mp3buf.length > 0) mp3Data.push(mp3buf);
 
-    // 圧縮後のBlobを作成
     const blob = new Blob(mp3Data, { type: 'audio/mp3' });
-    // Fileオブジェクトとして返す
     return new File([blob], file.name.replace(/\.[^/.]+$/, "") + "_compressed.mp3", { type: 'audio/mp3' });
 
   } catch (e) {
@@ -79,7 +75,7 @@ const App = () => {
   const [isPlaying, setIsPlaying] = useState(false);
   const audioRef = useRef(null);
   const [activeTab, setActiveTab] = useState('summary');
-  const [statusMessage, setStatusMessage] = useState(""); // 状態表示用
+  const [statusMessage, setStatusMessage] = useState("");
 
   const handleFileChange = (e) => {
     const selectedFile = e.target.files[0];
@@ -121,7 +117,6 @@ const App = () => {
         try {
           uploadFile = await compressAudio(file);
           setStatusMessage(`圧縮完了: ${(file.size/1024/1024).toFixed(1)}MB → ${(uploadFile.size/1024/1024).toFixed(1)}MB`);
-          console.log("Compressed size:", uploadFile.size);
           
           if (uploadFile.size > 5.5 * 1024 * 1024) {
              throw new Error("圧縮してもファイルサイズが大きすぎます。もっと短い音声を使用してください。");
@@ -146,8 +141,15 @@ const App = () => {
       });
 
       if (!response.ok) {
-        throw new Error(`サーバーエラー: ${response.statusText}`);
+        let errorMessage = `サーバーエラー: ${response.statusText}`;
+        try {
+          const errorData = await response.json();
+          if (errorData.error) errorMessage += ` (${errorData.error})`;
+        } catch (e) {}
+        throw new Error(errorMessage);
       }
+
+      setProgress(70);
 
       const data = await response.json();
       if (data.error) throw new Error(data.error);
@@ -158,7 +160,7 @@ const App = () => {
       
     } catch (error) {
       console.error('Error:', error);
-      alert('エラーが発生しました: ' + error.message);
+      alert('解析中にエラーが発生しました: ' + error.message);
       setProgress(0);
       setStatusMessage("エラー発生");
     } finally {
@@ -295,5 +297,6 @@ const App = () => {
   );
 };
 
+export default App;
 
 
