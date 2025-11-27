@@ -1,22 +1,7 @@
-const { SpeechClient } = require('@google-cloud/speech');
-const { VertexAI } = require('@google-cloud/vertexai');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
-// 環境変数の読み込み
-const credentials = JSON.parse(process.env.GOOGLE_SERVICE_KEY);
-
-// ★【重要修正】Netlify上で改行コードが壊れるのを防ぐ処理
-if (credentials.private_key) {
-  credentials.private_key = credentials.private_key.replace(/\\n/g, '\n');
-}
-
-const projectId = process.env.GCP_PROJECT_ID;
-const location = process.env.GCP_LOCATION; // us-central1 または us-west1
-
-const speechClient = new SpeechClient({ credentials });
-const vertexAI = new VertexAI({ project: projectId, location: location, googleAuthOptions: { credentials } });
-
-// モデル指定（安定版の Pro モデルを使用）
-const model = vertexAI.preview.getGenerativeModel({ model: 'gemini-1.0-pro' });
+// 環境変数からAPIキーを読み込む
+const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 
 exports.handler = async (event, context) => {
   // POSTメソッド以外は拒否
@@ -26,59 +11,73 @@ exports.handler = async (event, context) => {
 
   try {
     const body = JSON.parse(event.body);
-    const audioBase64 = body.audioBase64; // フロントエンドから送られたBase64データ
+    const audioBase64 = body.audioBase64;
 
     if (!audioBase64) {
       return { statusCode: 400, body: 'No audio data provided' };
     }
 
-    // 1. 音声認識 (Speech-to-Text)
-    const audio = { content: audioBase64 };
-    const config = {
-      encoding: 'MP3',
-      sampleRateHertz: 16000,
-      languageCode: 'ja-JP',
-    };
+    // モデルの指定 (Gemini 1.5 Flash)
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-    const [response] = await speechClient.recognize({ audio, config });
-    
-    // 音声認識結果がない場合のハンドリング
-    if (!response.results || response.results.length === 0) {
-        return { statusCode: 200, body: JSON.stringify({ transcript: "(音声が認識できませんでした)", summary: "なし", actionItems: [] }) };
-    }
-
-    const transcript = response.results
-      .map(result => result.alternatives[0].transcript)
-      .join('\n');
-
-    // 2. Vertex AI (Gemini) で解析
+    // プロンプトの作成
     const prompt = `
-      以下の通話記録を分析し、JSON形式で出力してください。
-      出力キー: "summary" (要約リスト), "actionItems" (タスクリスト: {task, assignee, deadline}), "sentiment" (ポジティブ/ネガティブ)
+      あなたは優秀な秘書です。以下の音声データを分析し、結果を必ずJSON形式のみで出力してください。
+      Markdownのコードブロック（\`\`\`json）は含めないでください。
 
-      通話記録:
-      ${transcript}
+      出力フォーマット:
+      {
+        "transcript": "音声の文字起こしテキスト",
+        "summary": ["要点の箇条書き1", "要点の箇条書き2"],
+        "actionItems": [
+          {"task": "タスク内容", "assignee": "担当者", "deadline": "期限"}
+        ],
+        "sentiment": "Positive / Neutral / Negative",
+        "sentimentScore": 0.8
+      }
     `;
 
-    const result = await model.generateContent(prompt);
-    const responseText = result.response.candidates[0].content.parts[0].text;
+    // Geminiに音声データとプロンプトを送信
+    const result = await model.generateContent([
+      prompt,
+      {
+        inlineData: {
+          mimeType: "audio/mp3",
+          data: audioBase64
+        }
+      }
+    ]);
+
+    const response = await result.response;
+    const text = response.text();
     
-    // JSON整形（Markdown記法 ```json ... ``` を除去）
-    const jsonString = responseText.replace(/```json|```/g, '').trim();
-    const analyzeResult = JSON.parse(jsonString);
+    // JSONの整形（万が一Markdownが含まれていた場合の除去）
+    const cleanJson = text.replace(/```json|```/g, '').trim();
+    const data = JSON.parse(cleanJson);
 
     return {
       statusCode: 200,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ transcript, ...analyzeResult }),
+      body: JSON.stringify(data),
     };
 
   } catch (error) {
     console.error('Error:', error);
-    // エラー内容を詳細に返す
     return {
       statusCode: 500,
       body: JSON.stringify({ error: error.message, details: error.toString() }),
     };
   }
 };
+
+ステップ 4：変更を反映する（完了！）
+最後にターミナルで以下のコマンドを順番に実行して、Netlifyへ反映させます。
+# 1. ライブラリを更新する
+npm install
+
+# 2. 変更をNetlifyへ送信する
+git add .
+git commit -m "Switch to simple API Key auth"
+git push origin main
+
+
