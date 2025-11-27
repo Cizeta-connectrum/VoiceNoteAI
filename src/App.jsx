@@ -4,7 +4,7 @@ import {
   MessageSquare, CalendarCheck, Smile, AlertCircle, Download, 
   Copy, Trash2, Calendar, FileText, Mail 
 } from 'lucide-react';
-import { Mp3Encoder } from 'lamejs'; // ★修正: より確実なインポート方法に変更
+import lamejs from 'lamejs'; // ★修正: default importに変更
 
 // ファイルをBase64に変換するヘルパー関数
 const fileToBase64 = (file) => {
@@ -12,7 +12,9 @@ const fileToBase64 = (file) => {
     const reader = new FileReader();
     reader.readAsDataURL(file);
     reader.onload = () => {
-      const base64String = reader.result.split(',')[1];
+      // "data:audio/mp3;base64,..." の先頭部分を削除して純粋なBase64だけにする
+      const result = reader.result;
+      const base64String = result.includes(',') ? result.split(',')[1] : result;
       resolve(base64String);
     };
     reader.onerror = (error) => reject(error);
@@ -22,12 +24,23 @@ const fileToBase64 = (file) => {
 // 音声を軽量MP3に圧縮する関数 (16kHz, Mono, 32kbps)
 const compressAudio = async (file) => {
   try {
+    console.log("圧縮開始:", file.name, file.size);
     const arrayBuffer = await file.arrayBuffer();
     const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+    
+    // デコード処理
+    let audioBuffer;
+    try {
+      audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+    } catch (decodeErr) {
+      throw new Error("音声ファイルのデコードに失敗しました。壊れているか非対応の形式です。");
+    }
 
+    // リサンプリング (16kHz) とモノラル化
     const targetSampleRate = 16000;
-    const offlineContext = new OfflineAudioContext(1, audioBuffer.duration * targetSampleRate, targetSampleRate);
+    // OfflineAudioContextの作成（長さ制限への対策）
+    const duration = audioBuffer.duration;
+    const offlineContext = new OfflineAudioContext(1, duration * targetSampleRate, targetSampleRate);
     
     const source = offlineContext.createBufferSource();
     source.buffer = audioBuffer;
@@ -37,14 +50,16 @@ const compressAudio = async (file) => {
     const renderedBuffer = await offlineContext.startRendering();
     const pcmData = renderedBuffer.getChannelData(0);
     
+    // MP3エンコード (lamejs)
     const samples = new Int16Array(pcmData.length);
     for (let i = 0; i < pcmData.length; i++) {
+      // クッピング対策を含めた変換
       let s = Math.max(-1, Math.min(1, pcmData[i]));
       samples[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
     }
 
-    // ★修正: Mp3Encoder を直接使用
-    const mp3encoder = new Mp3Encoder(1, targetSampleRate, 32);
+    // ★修正: lamejsのインスタンス化を修正
+    const mp3encoder = new lamejs.Mp3Encoder(1, targetSampleRate, 32); // 32kbps
     const mp3Data = [];
     const sampleBlockSize = 1152;
     
@@ -58,11 +73,12 @@ const compressAudio = async (file) => {
     if (mp3buf.length > 0) mp3Data.push(mp3buf);
 
     const blob = new Blob(mp3Data, { type: 'audio/mp3' });
+    console.log("圧縮完了:", blob.size);
     return new File([blob], file.name.replace(/\.[^/.]+$/, "") + "_compressed.mp3", { type: 'audio/mp3' });
 
   } catch (e) {
-    console.error("圧縮エラー:", e);
-    throw new Error("音声ファイルの圧縮に失敗しました。ファイル形式がサポートされていない可能性があります。");
+    console.error("圧縮プロセスエラー:", e);
+    throw e; // エラーを呼び出し元に伝播
   }
 };
 
@@ -110,20 +126,37 @@ const App = () => {
     try {
       let uploadFile = file;
 
-      // 4MBを超える場合は圧縮を試みる
-      const MAX_SIZE_BYTES = 4 * 1024 * 1024;
-      if (file.size > MAX_SIZE_BYTES) {
+      // 圧縮が必要かチェック (4MB以上なら圧縮を試みる)
+      const COMPRESSION_THRESHOLD = 4 * 1024 * 1024;
+      const ABSOLUTE_LIMIT = 5.8 * 1024 * 1024; // Netlify制限ギリギリ
+
+      if (file.size > COMPRESSION_THRESHOLD) {
         setStatusMessage("ファイルサイズが大きいため圧縮しています...");
         try {
-          uploadFile = await compressAudio(file);
-          setStatusMessage(`圧縮完了: ${(file.size/1024/1024).toFixed(1)}MB → ${(uploadFile.size/1024/1024).toFixed(1)}MB`);
+          const compressed = await compressAudio(file);
           
-          if (uploadFile.size > 5.5 * 1024 * 1024) {
-             throw new Error("圧縮してもファイルサイズが大きすぎます。もっと短い音声を使用してください。");
+          // 圧縮成功かつサイズが小さくなっていれば採用
+          if (compressed.size < file.size) {
+            uploadFile = compressed;
+            setStatusMessage(`圧縮完了: ${(file.size/1024/1024).toFixed(1)}MB → ${(uploadFile.size/1024/1024).toFixed(1)}MB`);
+          } else {
+            console.warn("圧縮しましたがサイズが小さくなりませんでした。");
           }
         } catch (e) {
-          throw new Error("音声の圧縮に失敗しました: " + e.message);
+          console.warn("圧縮に失敗しました:", e);
+          // 圧縮に失敗しても、元のファイルがギリギリ送れるサイズなら続行する
+          if (file.size < ABSOLUTE_LIMIT) {
+             setStatusMessage("圧縮に失敗しましたが、そのまま送信を試みます...");
+             uploadFile = file; // 元のファイルを使う
+          } else {
+             throw new Error(`音声ファイルの圧縮に失敗し、元のサイズ(${ (file.size/1024/1024).toFixed(1) }MB)も大きすぎるため送信できません。`);
+          }
         }
+      }
+
+      // 最終チェック
+      if (uploadFile.size > ABSOLUTE_LIMIT) {
+        throw new Error(`送信ファイルサイズ(${ (uploadFile.size/1024/1024).toFixed(1) }MB)が制限を超えています。より短い音声を使用してください。`);
       }
 
       setProgress(20);
@@ -160,7 +193,7 @@ const App = () => {
       
     } catch (error) {
       console.error('Error:', error);
-      alert('解析中にエラーが発生しました: ' + error.message);
+      alert('解析エラー: ' + error.message);
       setProgress(0);
       setStatusMessage("エラー発生");
     } finally {
