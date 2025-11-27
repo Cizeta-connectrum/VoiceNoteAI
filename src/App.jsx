@@ -282,18 +282,51 @@ const App = () => {
 
         const transcriptPrompt = `
           以下の音声ファイルを聞き取り、会話内容をすべて文字起こししてください。
-          発言者ごとに改行し、「アイキャット担当者（金子,高島,川越,澤田,上田）」と「顧客」を区別し、名前がわかる場合は "名前: 発言" の形式にしてください。
-          余計な前置きや挨拶は不要です。
+          
+          【出力形式の絶対ルール】
+          - JSON形式ではなく、純粋なプレーンテキストで出力してください。
+          - 各発言は改行で区切ってください。
+          - 形式: "話者名: 発言内容"
+          - 話者名が特定できない場合は「話者A」「話者B」としてください。
+          - 「アイキャット担当者（金子,高島,川越,澤田,上田）」と「顧客」を可能な限り区別してください。
+          - 余計なMarkdown記法や前置きは不要です。
         `;
 
         const transcriptText = await callGeminiDirectly(apiKey, transcriptPrompt, audioBase64);
         
+        // JSON形式で返ってきた場合の整形処理 (Speaker/utterance対策)
         try {
-            const json = JSON.parse(transcriptText);
-            if (json.transcript) fullTranscript += json.transcript + "\n";
-            else fullTranscript += transcriptText + "\n";
+            // 文字列の中にJSONが含まれていないかチェック
+            const jsonStart = transcriptText.indexOf('[');
+            const jsonEnd = transcriptText.lastIndexOf(']');
+            
+            if (jsonStart !== -1 && jsonEnd !== -1) {
+                // 配列形式のJSONが見つかった場合
+                const potentialJson = transcriptText.substring(jsonStart, jsonEnd + 1);
+                const json = JSON.parse(potentialJson);
+                
+                if (Array.isArray(json)) {
+                    // [{Speaker: "...", utterance: "..."}] のような配列をテキスト化
+                    const formatted = json.map(item => {
+                        const name = item.Speaker || item.speaker || item.role || "話者";
+                        const text = item.utterance || item.text || item.content || "";
+                        return `${name}: ${text}`;
+                    }).join("\n");
+                    fullTranscript += formatted + "\n";
+                } else {
+                    fullTranscript += transcriptText + "\n";
+                }
+            } else {
+                // 単純なJSONオブジェクトの場合 { transcript: "..." }
+                const json = JSON.parse(transcriptText);
+                if (json.transcript) fullTranscript += json.transcript + "\n";
+                else fullTranscript += transcriptText + "\n";
+            }
         } catch (e) {
-            fullTranscript += transcriptText + "\n";
+            // JSONパースエラー ＝ プレーンテキストなのでそのまま追加
+            // Markdownのコードブロックを削除して綺麗にする
+            const cleanText = transcriptText.replace(/```json|```/g, '').trim();
+            fullTranscript += cleanText + "\n";
         }
 
         if (processed.isEnd) {
@@ -414,6 +447,7 @@ const App = () => {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 font-sans selection:bg-indigo-100 selection:text-indigo-800">
+      {/* ヘッダー */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-10">
         <div className="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
           <div className="flex items-center space-x-2">
