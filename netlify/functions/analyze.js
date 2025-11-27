@@ -17,8 +17,8 @@ export const handler = async (event, context) => {
       return { statusCode: 500, body: JSON.stringify({ error: "API Key is missing in environment variables" }) };
     }
 
-    // まずは標準的な gemini-1.5-flash を試します
-    const modelName = "gemini-1.5-flash"; 
+    // デバッグ情報に基づき、利用可能なモデル（gemini-2.5-flash）に変更します
+    const modelName = "gemini-2.5-flash"; 
 
     const promptText = `
       あなたは優秀な秘書です。以下の音声データを分析し、結果を必ずJSON形式のみで出力してください。
