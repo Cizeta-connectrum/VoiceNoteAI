@@ -110,10 +110,10 @@ const processAudioChunk = async (file, startTime = 0, duration = null) => {
   }
 };
 
-// ★追加: 要約用にテキストを最適化する関数
-// Netlifyのタイムアウト(10秒)を防ぐため、長すぎるテキストを間引いて短縮します
+// ★修正: 要約用にテキストを最適化する関数
+// Netlifyのタイムアウト(10秒)を防ぐため、制限文字数を削減して高速化
 const optimizeTranscriptForSummary = (text) => {
-  const MAX_CHARS = 15000; // 処理可能な文字数の目安
+  const MAX_CHARS = 7000; // 15000 -> 7000 に削減
   if (text.length <= MAX_CHARS) return text;
 
   console.log(`テキストが長すぎます(${text.length}文字)。要約用に短縮します。`);
@@ -254,13 +254,14 @@ const App = () => {
 
         if (!summaryResponse.ok) {
           console.warn(`要約生成APIエラー: ${summaryResponse.statusText}`);
-          // エラーでも続行（文字起こし表示のため）
+          // 失敗時はアラートを出すが、処理は続行
+          alert("要約の生成に失敗しました（タイムアウト）。\n文字起こし結果のみ表示します。");
         } else {
           finalData = await summaryResponse.json();
         }
       } catch (summaryError) {
         console.error("要約生成エラー:", summaryError);
-        // エラーでも続行
+        alert("要約の生成中にエラーが発生しました。\n文字起こし結果のみ表示します。");
       }
 
       // 結果を統合 (文字起こしは常に完全版を使用)
