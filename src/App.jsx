@@ -4,8 +4,21 @@ import {
   MessageSquare, CalendarCheck, Smile, AlertCircle, Download, 
   Copy, Trash2, Calendar, FileText, Mail 
 } from 'lucide-react';
-// lamejsのインポート互換性を確保
-import * as lamejs from 'lamejs';
+
+// lamejsをCDNから動的に読み込む関数
+const loadLamejs = () => {
+  return new Promise((resolve, reject) => {
+    if (window.lamejs) {
+      resolve(window.lamejs);
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lamejs.min.js';
+    script.onload = () => resolve(window.lamejs);
+    script.onerror = () => reject(new Error('Failed to load lamejs'));
+    document.head.appendChild(script);
+  });
+};
 
 // ファイルをBase64に変換するヘルパー関数
 const fileToBase64 = (file) => {
@@ -21,10 +34,13 @@ const fileToBase64 = (file) => {
   });
 };
 
-// 音声を軽量MP3に圧縮する関数
-const compressAudio = async (file) => {
+// 音声を指定範囲で切り出し、軽量MP3に圧縮する関数
+const processAudioChunk = async (file, startTime = 0, duration = null) => {
   try {
-    console.log("圧縮開始:", file.name, file.size);
+    // まずライブラリをロード
+    await loadLamejs();
+
+    console.log(`音声処理開始: ${startTime}秒から${duration ? duration + '秒間' : '最後まで'}`);
     const arrayBuffer = await file.arrayBuffer();
     const AudioContext = window.AudioContext || window.webkitAudioContext;
     const audioContext = new AudioContext();
@@ -34,22 +50,27 @@ const compressAudio = async (file) => {
     try {
       audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
     } catch (decodeErr) {
-      throw new Error("音声ファイルのデコードに失敗しました。ファイルが壊れているか、ブラウザが対応していない形式です。");
+      throw new Error("音声ファイルのデコードに失敗しました。");
     }
 
-    // ★修正: 長時間ファイル対策としてサンプリングレートを調整
-    // Geminiは16kHz推奨ですが、容量削減のため長時間ファイルは少し落とすことも検討
-    // ここでは標準的な16kHzを採用しつつ、モノラル化で容量を削ります
+    // 切り出し範囲の計算
+    const totalDuration = audioBuffer.duration;
+    const actualStartTime = Math.min(startTime, totalDuration);
+    const actualDuration = duration 
+      ? Math.min(duration, totalDuration - actualStartTime) 
+      : totalDuration - actualStartTime;
+
+    if (actualDuration <= 0) return null; // 処理する範囲がない
+
+    // リサンプリング (16kHz) とモノラル化
     const targetSampleRate = 16000;
-    const duration = audioBuffer.duration;
-    
     const OfflineContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-    const offlineContext = new OfflineContext(1, duration * targetSampleRate, targetSampleRate);
+    const offlineContext = new OfflineContext(1, actualDuration * targetSampleRate, targetSampleRate);
     
     const source = offlineContext.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(offlineContext.destination);
-    source.start(0);
+    source.start(0, actualStartTime, actualDuration);
     
     const renderedBuffer = await offlineContext.startRendering();
     const pcmData = renderedBuffer.getChannelData(0);
@@ -60,14 +81,8 @@ const compressAudio = async (file) => {
       samples[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
     }
 
-    // ライブラリの読み込み互換性チェック
-    const Mp3Encoder = lamejs.Mp3Encoder || (lamejs.default && lamejs.default.Mp3Encoder);
-    if (!Mp3Encoder) {
-      throw new Error("圧縮ライブラリ(lamejs)のロードに失敗しました。");
-    }
-
-    // ★修正: ビットレートを32kbpsに設定（音声認識にはこれでも十分）
-    const mp3encoder = new Mp3Encoder(1, targetSampleRate, 32); 
+    // window.lamejs からエンコーダーを取得
+    const mp3encoder = new window.lamejs.Mp3Encoder(1, targetSampleRate, 32); 
     const mp3Data = [];
     const sampleBlockSize = 1152;
     
@@ -81,11 +96,14 @@ const compressAudio = async (file) => {
     if (mp3buf.length > 0) mp3Data.push(mp3buf);
 
     const blob = new Blob(mp3Data, { type: 'audio/mp3' });
-    console.log("圧縮完了:", blob.size);
-    return new File([blob], file.name.replace(/\.[^/.]+$/, "") + "_compressed.mp3", { type: 'audio/mp3' });
+    return {
+      blob: new File([blob], "chunk.mp3", { type: 'audio/mp3' }),
+      duration: actualDuration,
+      isEnd: (actualStartTime + actualDuration) >= totalDuration
+    };
 
   } catch (e) {
-    console.error("圧縮プロセスエラー:", e);
+    console.error("音声処理エラー:", e);
     throw e;
   }
 };
@@ -132,83 +150,93 @@ const App = () => {
     setStatusMessage("準備中...");
 
     try {
-      let uploadFile = file;
+      // 分割設定 (10分 = 600秒)
+      const CHUNK_DURATION = 600; 
+      let fullTranscript = "";
+      let currentStartTime = 0;
+      let chunkCount = 1;
+      let isFinished = false;
 
-      // ★修正: Netlify制限(6MB)を考慮し、Base64増加分(x1.33)を引いた安全圏を設定
-      // 4.2MBを超えると危険域
-      const COMPRESSION_THRESHOLD = 3.5 * 1024 * 1024; // 3.5MB以上なら圧縮試行
-      const ABSOLUTE_LIMIT = 4.2 * 1024 * 1024; // 4.2MB以上は送信不可
+      // 圧縮・分割・送信ループ
+      while (!isFinished) {
+        setStatusMessage(`音声処理中... (パート ${chunkCount})`);
+        
+        // 音声を切り出して圧縮 (CDNロード含む)
+        const processed = await processAudioChunk(file, currentStartTime, CHUNK_DURATION);
+        
+        if (!processed || processed.blob.size === 0) {
+          break; // データなし
+        }
 
-      if (file.size > COMPRESSION_THRESHOLD) {
-        setStatusMessage("ファイルサイズが大きいため圧縮しています...");
-        try {
-          const compressed = await compressAudio(file);
-          
-          if (compressed.size < file.size) {
-            uploadFile = compressed;
-            setStatusMessage(`圧縮完了: ${(file.size/1024/1024).toFixed(1)}MB → ${(uploadFile.size/1024/1024).toFixed(1)}MB`);
-          } else {
-            console.warn("圧縮しましたがサイズが小さくなりませんでした。");
-          }
-        } catch (e) {
-          console.warn("圧縮に失敗しました:", e);
-          if (file.size < ABSOLUTE_LIMIT) {
-             setStatusMessage("圧縮に失敗しましたが、そのまま送信を試みます...");
-             uploadFile = file;
-          } else {
-             throw new Error(`音声圧縮に失敗し、元のサイズ(${ (file.size/1024/1024).toFixed(1) }MB)も送信制限を超えています。`);
-          }
+        // サイズチェック
+        if (processed.blob.size > 4.5 * 1024 * 1024) {
+          throw new Error(`分割後のサイズ(${ (processed.blob.size/1024/1024).toFixed(1) }MB)がまだ大きすぎます。`);
+        }
+
+        setStatusMessage(`パート ${chunkCount} を解析中...`);
+        setProgress(10 + (chunkCount * 5)); 
+
+        const audioBase64 = await fileToBase64(processed.blob);
+
+        const response = await fetch('/.netlify/functions/analyze', {
+          method: 'POST',
+          body: JSON.stringify({ 
+            audioBase64,
+            mode: "transcript" 
+          }),
+          headers: { 'Content-Type': 'application/json' }
+        });
+
+        if (!response.ok) {
+          throw new Error(`パート ${chunkCount} の解析に失敗: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        if (data.transcript) {
+          fullTranscript += data.transcript + "\n";
+        }
+
+        if (processed.isEnd) {
+          isFinished = true;
+        } else {
+          currentStartTime += CHUNK_DURATION;
+          chunkCount++;
         }
       }
 
-      // 最終サイズチェック
-      if (uploadFile.size > ABSOLUTE_LIMIT) {
-        throw new Error(`送信サイズが大きすぎます(${ (uploadFile.size/1024/1024).toFixed(1) }MB)。\nNetlifyの制限により送信できません。\nもっと短い音声に分割してください。`);
+      setStatusMessage("全データを統合して要約中...");
+      setProgress(90);
+
+      if (!fullTranscript.trim()) {
+        throw new Error("文字起こしが生成されませんでした。");
       }
 
-      setProgress(20);
-      setStatusMessage("アップロード中...");
-      
-      const audioBase64 = await fileToBase64(uploadFile);
-      
-      setProgress(40);
-      setStatusMessage("AI解析中...（これには時間がかかります）");
-
-      const response = await fetch('/.netlify/functions/analyze', {
+      const summaryResponse = await fetch('/.netlify/functions/analyze', {
         method: 'POST',
-        body: JSON.stringify({ audioBase64 }),
+        body: JSON.stringify({ 
+          transcriptText: fullTranscript,
+          mode: "summary" 
+        }),
         headers: { 'Content-Type': 'application/json' }
       });
 
-      if (!response.ok) {
-        // ステータスコードに応じたエラーメッセージ
-        if (response.status === 413) {
-          throw new Error("ファイルサイズが大きすぎます (413 Payload Too Large)。");
-        }
-        if (response.status === 504 || response.status === 502) {
-          throw new Error("処理がタイムアウトしました。音声が長すぎる可能性があります。");
-        }
-
-        let errorMessage = `サーバーエラー: ${response.status} ${response.statusText}`;
-        try {
-          const errorData = await response.json();
-          if (errorData.error) errorMessage += ` (${errorData.error})`;
-        } catch (e) {}
-        throw new Error(errorMessage);
+      if (!summaryResponse.ok) {
+        throw new Error(`要約生成に失敗: ${summaryResponse.statusText}`);
       }
 
-      setProgress(70);
+      const finalData = await summaryResponse.json();
+      
+      setResult({
+        ...finalData,
+        transcript: fullTranscript
+      });
 
-      const data = await response.json();
-      if (data.error) throw new Error(data.error);
-
-      setResult(data);
       setProgress(100);
       setStatusMessage("完了");
       
     } catch (error) {
       console.error('Error:', error);
-      alert('解析エラー: ' + error.message);
+      alert('解析中にエラーが発生しました: ' + error.message);
       setProgress(0);
       setStatusMessage("エラー発生");
     } finally {
@@ -263,7 +291,7 @@ const App = () => {
                     <UploadCloud className="w-16 h-16 text-indigo-500 mb-4" />
                     <h3 className="text-lg font-bold text-slate-700 mb-2">音声ファイルをドロップ</h3>
                     <label className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2.5 rounded-full cursor-pointer">ファイルを選択<input type="file" className="hidden" accept="audio/*" onChange={handleFileChange} /></label>
-                    <p className="mt-4 text-xs text-slate-400">自動圧縮機能付き (対応: mp3, wav, m4a)</p>
+                    <p className="mt-4 text-xs text-slate-400">自動圧縮・分割機能付き (長時間ファイル対応)</p>
                   </>
                 ) : (
                   <div className="w-full max-w-md">
