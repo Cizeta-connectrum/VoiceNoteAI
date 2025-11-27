@@ -110,6 +110,24 @@ const processAudioChunk = async (file, startTime = 0, duration = null) => {
   }
 };
 
+// ★追加: 要約用にテキストを最適化する関数
+// Netlifyのタイムアウト(10秒)を防ぐため、長すぎるテキストを間引いて短縮します
+const optimizeTranscriptForSummary = (text) => {
+  const MAX_CHARS = 15000; // 処理可能な文字数の目安
+  if (text.length <= MAX_CHARS) return text;
+
+  console.log(`テキストが長すぎます(${text.length}文字)。要約用に短縮します。`);
+  
+  // 前半・中盤・後半を切り出して結合する戦略
+  const partSize = Math.floor(MAX_CHARS / 3);
+  const start = text.substring(0, partSize);
+  const middleStart = Math.floor(text.length / 2) - Math.floor(partSize / 2);
+  const middle = text.substring(middleStart, middleStart + partSize);
+  const end = text.substring(text.length - partSize);
+
+  return `${start}\n\n...(中略)...\n\n${middle}\n\n...(中略)...\n\n${end}`;
+};
+
 const App = () => {
   const [file, setFile] = useState(null);
   const [fileUrl, setFileUrl] = useState(null);
@@ -175,7 +193,7 @@ const App = () => {
           throw new Error(`分割後のサイズ(${ (processed.blob.size/1024/1024).toFixed(1) }MB)がまだ大きすぎます。`);
         }
 
-        setStatusMessage(`パート ${chunkCount} を解析中...`);
+        setStatusMessage(`パート ${chunkCount} を文字起こし中...`);
         setProgress(10 + (chunkCount * 5)); 
 
         const audioBase64 = await fileToBase64(processed.blob);
@@ -222,10 +240,13 @@ const App = () => {
       };
 
       try {
+        // ★修正: 要約用にテキストを最適化（短縮）してから送信
+        const optimizedText = optimizeTranscriptForSummary(fullTranscript);
+
         const summaryResponse = await fetch('/.netlify/functions/analyze', {
           method: 'POST',
           body: JSON.stringify({ 
-            transcriptText: fullTranscript,
+            transcriptText: optimizedText,
             mode: "summary" 
           }),
           headers: { 'Content-Type': 'application/json' }
@@ -233,23 +254,26 @@ const App = () => {
 
         if (!summaryResponse.ok) {
           console.warn(`要約生成APIエラー: ${summaryResponse.statusText}`);
-          alert("要約の生成に失敗しました（タイムアウト）。\n文字起こし結果のみ表示します。");
+          // エラーでも続行（文字起こし表示のため）
         } else {
           finalData = await summaryResponse.json();
         }
       } catch (summaryError) {
         console.error("要約生成エラー:", summaryError);
-        alert("要約の生成中にエラーが発生しました。\n文字起こし結果のみ表示します。");
+        // エラーでも続行
       }
 
-      // 結果を統合
+      // 結果を統合 (文字起こしは常に完全版を使用)
       setResult({
         ...finalData,
         transcript: fullTranscript
       });
 
-      if (finalData.summary[0].includes("失敗")) {
+      // 要約成功時はsummaryタブ、失敗時はtranscriptタブを表示
+      if (finalData.summary && finalData.summary[0] && finalData.summary[0].includes("失敗")) {
         setActiveTab('transcript');
+      } else {
+        setActiveTab('summary');
       }
 
       setProgress(100);
