@@ -21,7 +21,8 @@ const loadLamejs = () => {
 };
 
 // Gemini APIを直接呼び出す関数 (バックエンドを経由しない)
-const callGeminiDirectly = async (apiKey, promptText, audioBase64 = null) => {
+// ★修正: responseMimeType引数を追加し、テキストモードとJSONモードを切り替え可能に
+const callGeminiDirectly = async (apiKey, promptText, audioBase64 = null, responseMimeType = "application/json") => {
   if (!apiKey) {
     throw new Error("APIキーが設定されていません。画面右上の「設定」からGoogle APIキーを入力してください。");
   }
@@ -50,7 +51,7 @@ const callGeminiDirectly = async (apiKey, promptText, audioBase64 = null) => {
     body: JSON.stringify({
       contents: contents,
       generationConfig: {
-        response_mime_type: "application/json",
+        response_mime_type: responseMimeType, // ★指定された形式を使用
         max_output_tokens: 8192
       }
     })
@@ -58,7 +59,6 @@ const callGeminiDirectly = async (apiKey, promptText, audioBase64 = null) => {
 
   if (!response.ok) {
     const errorText = await response.text();
-    // APIキーが無効な場合のエラーハンドリング
     if (response.status === 400 && errorText.includes("API_KEY_INVALID")) {
       throw new Error("APIキーが無効です。正しいキーが設定されているか確認してください。");
     }
@@ -292,42 +292,11 @@ const App = () => {
           - 余計なMarkdown記法や前置きは不要です。
         `;
 
-        const transcriptText = await callGeminiDirectly(apiKey, transcriptPrompt, audioBase64);
+        // ★修正: text/plain モードで呼び出す
+        const transcriptText = await callGeminiDirectly(apiKey, transcriptPrompt, audioBase64, "text/plain");
         
-        // JSON形式で返ってきた場合の整形処理 (Speaker/utterance対策)
-        try {
-            // 文字列の中にJSONが含まれていないかチェック
-            const jsonStart = transcriptText.indexOf('[');
-            const jsonEnd = transcriptText.lastIndexOf(']');
-            
-            if (jsonStart !== -1 && jsonEnd !== -1) {
-                // 配列形式のJSONが見つかった場合
-                const potentialJson = transcriptText.substring(jsonStart, jsonEnd + 1);
-                const json = JSON.parse(potentialJson);
-                
-                if (Array.isArray(json)) {
-                    // [{Speaker: "...", utterance: "..."}] のような配列をテキスト化
-                    const formatted = json.map(item => {
-                        const name = item.Speaker || item.speaker || item.role || "話者";
-                        const text = item.utterance || item.text || item.content || "";
-                        return `${name}: ${text}`;
-                    }).join("\n");
-                    fullTranscript += formatted + "\n";
-                } else {
-                    fullTranscript += transcriptText + "\n";
-                }
-            } else {
-                // 単純なJSONオブジェクトの場合 { transcript: "..." }
-                const json = JSON.parse(transcriptText);
-                if (json.transcript) fullTranscript += json.transcript + "\n";
-                else fullTranscript += transcriptText + "\n";
-            }
-        } catch (e) {
-            // JSONパースエラー ＝ プレーンテキストなのでそのまま追加
-            // Markdownのコードブロックを削除して綺麗にする
-            const cleanText = transcriptText.replace(/```json|```/g, '').trim();
-            fullTranscript += cleanText + "\n";
-        }
+        // 返ってきたテキストをそのまま結合（余計なパース処理を削除）
+        fullTranscript += transcriptText + "\n";
 
         if (processed.isEnd) {
           isFinished = true;
@@ -379,6 +348,7 @@ const App = () => {
         `;
 
         try {
+          // 要約はJSONモードで呼び出す (デフォルト)
           const resultText = await callGeminiDirectly(apiKey, analysisPrompt);
           const cleanJson = resultText.replace(/```json|```/g, '').trim();
           const chunkData = JSON.parse(cleanJson);
