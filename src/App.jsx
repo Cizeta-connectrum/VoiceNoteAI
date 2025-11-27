@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   UploadCloud, FileAudio, CheckCircle, Play, Pause, Cpu, List, 
   MessageSquare, CalendarCheck, Smile, AlertCircle, Download, 
-  Copy, Trash2, Calendar, FileText, Mail, Settings, X
+  Copy, Trash2, Calendar, FileText, Mail, Settings, X, User
 } from 'lucide-react';
 
 // lamejsをCDNから動的に読み込む関数
@@ -20,8 +20,7 @@ const loadLamejs = () => {
   });
 };
 
-// Gemini APIを直接呼び出す関数 (バックエンドを経由しない)
-// ★修正: responseMimeType引数を追加し、テキストモードとJSONモードを切り替え可能に
+// Gemini APIを直接呼び出す関数
 const callGeminiDirectly = async (apiKey, promptText, audioBase64 = null, responseMimeType = "application/json") => {
   if (!apiKey) {
     throw new Error("APIキーが設定されていません。画面右上の「設定」からGoogle APIキーを入力してください。");
@@ -51,7 +50,7 @@ const callGeminiDirectly = async (apiKey, promptText, audioBase64 = null, respon
     body: JSON.stringify({
       contents: contents,
       generationConfig: {
-        response_mime_type: responseMimeType, // ★指定された形式を使用
+        response_mime_type: responseMimeType,
         max_output_tokens: 8192
       }
     })
@@ -154,7 +153,7 @@ const processAudioChunk = async (file, startTime = 0, duration = null) => {
   }
 };
 
-const splitTextIntoChunks = (text, maxLength = 7000) => {
+const splitTextIntoChunks = (text, maxLength = 15000) => {
   const chunks = [];
   let currentChunk = "";
   const lines = text.split(/\n/);
@@ -173,32 +172,20 @@ const splitTextIntoChunks = (text, maxLength = 7000) => {
   return chunks;
 };
 
-const mergeAnalysisResults = (results) => {
-  const merged = {
-    summary: [],
-    actionItems: [],
-    sentiment: "Neutral",
-    sentimentScore: 0
-  };
-
-  let totalScore = 0;
-  let validScoreCount = 0;
-
-  results.forEach(res => {
-    if (res.summary && Array.isArray(res.summary)) merged.summary.push(...res.summary);
-    if (res.actionItems && Array.isArray(res.actionItems)) merged.actionItems.push(...res.actionItems);
-    if (typeof res.sentimentScore === 'number') {
-      totalScore += res.sentimentScore;
-      validScoreCount++;
+// ★改良: 文字起こしテキストを見やすいオブジェクト配列にパースする関数
+const parseTranscript = (text) => {
+  if (!text) return [];
+  return text.split('\n').filter(line => line.trim() !== '').map(line => {
+    // "名前: 発言" の形式を探す
+    const colonIndex = line.indexOf(':');
+    if (colonIndex !== -1) {
+      return {
+        speaker: line.substring(0, colonIndex).trim(),
+        text: line.substring(colonIndex + 1).trim()
+      };
     }
+    return { speaker: '', text: line };
   });
-
-  const avgScore = validScoreCount > 0 ? totalScore / validScoreCount : 0.5;
-  merged.sentimentScore = avgScore;
-  merged.sentiment = avgScore >= 0.6 ? "Positive" : avgScore <= 0.4 ? "Negative" : "Neutral";
-  merged.summary = [...new Set(merged.summary)];
-  
-  return merged;
 };
 
 const App = () => {
@@ -212,7 +199,6 @@ const App = () => {
   const [activeTab, setActiveTab] = useState('summary');
   const [statusMessage, setStatusMessage] = useState("");
   
-  // APIキー管理
   const [apiKey, setApiKey] = useState("");
   const [showSettings, setShowSettings] = useState(false);
 
@@ -285,18 +271,42 @@ const App = () => {
           
           【出力形式の絶対ルール】
           - JSON形式ではなく、純粋なプレーンテキストで出力してください。
-          - 各発言は改行で区切ってください。
+          - 各発言は必ず改行で区切ってください。
           - 形式: "話者名: 発言内容"
           - 話者名が特定できない場合は「話者A」「話者B」としてください。
           - 「アイキャット担当者（金子,高島,川越,澤田,上田）」と「顧客」を可能な限り区別してください。
           - 余計なMarkdown記法や前置きは不要です。
         `;
 
-        // ★修正: text/plain モードで呼び出す
         const transcriptText = await callGeminiDirectly(apiKey, transcriptPrompt, audioBase64, "text/plain");
         
-        // 返ってきたテキストをそのまま結合（余計なパース処理を削除）
-        fullTranscript += transcriptText + "\n";
+        // 前回の修正と同様のクリーニング処理
+        let cleanedChunk = transcriptText;
+        try {
+            const jsonStart = transcriptText.indexOf('[');
+            const jsonEnd = transcriptText.lastIndexOf(']');
+            if (jsonStart !== -1 && jsonEnd !== -1) {
+                const potentialJson = transcriptText.substring(jsonStart, jsonEnd + 1);
+                const json = JSON.parse(potentialJson);
+                if (Array.isArray(json)) {
+                    cleanedChunk = json.map(item => {
+                        const name = item.Speaker || item.speaker || item.role || "話者";
+                        const text = item.utterance || item.text || item.content || "";
+                        return `${name}: ${text}`;
+                    }).join("\n");
+                }
+            } else {
+               const jsonObjStart = transcriptText.indexOf('{');
+               if (jsonObjStart !== -1) {
+                 const json = JSON.parse(transcriptText.substring(jsonObjStart));
+                 if (json.transcript) cleanedChunk = json.transcript;
+               }
+            }
+        } catch (e) {
+            cleanedChunk = transcriptText.replace(/```json|```/g, '').trim();
+        }
+        
+        fullTranscript += cleanedChunk + "\n";
 
         if (processed.isEnd) {
           isFinished = true;
@@ -311,71 +321,89 @@ const App = () => {
 
       if (!fullTranscript.trim()) throw new Error("文字起こしが生成されませんでした。");
 
-      // Phase 2: 要約
-      const textChunks = splitTextIntoChunks(fullTranscript, 6000);
-      const partialResults = [];
+      // Phase 2: 要約 (分割して情報を抽出し、最後に統合する)
+      const textChunks = splitTextIntoChunks(fullTranscript, 12000);
+      const partialSummaries = [];
 
       for (let i = 0; i < textChunks.length; i++) {
         const chunk = textChunks[i];
-        setStatusMessage(`要約生成中... (${i + 1}/${textChunks.length})`);
+        setStatusMessage(`内容分析中... (${i + 1}/${textChunks.length})`);
         
+        // 中間分析: 情報を抽出するだけ (要約として完成させない)
         const analysisPrompt = `
-          あなたは優秀な秘書です。以下の【通話ログ】を分析し、JSON形式で出力してください。
+          以下の通話ログから、重要な情報を抽出してください。
 
-          ■製品リスト
-          [インプラント関連] LANDmarker, LANDmark Guide, LANDmark Crown
-          [CT画像関連] NewTom GO, NewTom GiANO, NewTom VGi evo, RevoluX, PSピックス, X-VS, SOPRO717 ファースト, Good Dr's
-          [アプリ] PerioDx, QUON Perio, PaTaKaRUSH
-          [その他] Form3B+, FlashMax460
+          ■抽出してほしい情報
+          - 話題に出ている製品名 (LANDmarker, NewTom, PerioDxなど)
+          - 通話の目的と背景
+          - 顧客からの質問や課題
+          - 決定事項やネクストアクション
 
-          ■要約テンプレート
-          【対象製品】上記リストの中で話題に出た製品名（なければ「なし」）
-          【目的】通話の主な目的
-          【背景】現在の状況や経緯
-          【質問・課題】具体的な質問内容や相談事項
-          【希望・要望】相手に求めている対応
-
-          ■出力フォーマット(JSONのみ):
+          ■出力形式(JSON):
           {
-            "summary": ["【対象製品】...", "【目的】...", "【背景】...", "【質問・課題】...", "【希望・要望】..."],
-            "actionItems": [{"task": "...", "assignee": "...", "deadline": "..."}],
-            "sentiment": "Positive/Neutral/Negative",
-            "sentimentScore": 0.8
+            "extracted_points": ["ポイント1", "ポイント2", ...],
+            "action_items": [{"task": "...", "assignee": "...", "deadline": "..."}]
           }
 
-          【通話ログ】
+          【通話ログ(一部)】
           ${chunk}
         `;
 
         try {
-          // 要約はJSONモードで呼び出す (デフォルト)
           const resultText = await callGeminiDirectly(apiKey, analysisPrompt);
           const cleanJson = resultText.replace(/```json|```/g, '').trim();
-          const chunkData = JSON.parse(cleanJson);
-          partialResults.push(chunkData);
+          partialSummaries.push(JSON.parse(cleanJson));
         } catch (e) {
-          console.error(`パート${i+1}の要約エラー:`, e);
+          console.error(`パート${i+1}の分析エラー:`, e);
         }
       }
 
-      let finalData;
-      if (partialResults.length === 0) {
-        alert("要約の生成に失敗しました。\n文字起こし結果のみ表示します。");
-        finalData = {
-          summary: ["(要約生成失敗)"],
-          actionItems: [],
-          sentimentScore: 0.5
-        };
-        setActiveTab('transcript');
-      } else {
-        finalData = mergeAnalysisResults(partialResults);
-        setActiveTab('summary');
-      }
+      // Phase 3: 最終統合 (重複を排除してまとめる)
+      setStatusMessage("最終レポートを作成中...");
+      
+      const synthesisPrompt = `
+        あなたは優秀な秘書です。
+        以下の「部分的な分析結果リスト」を統合し、重複を排除して、一つの完璧な要約レポートを作成してください。
+
+        ■入力データ (部分的な分析結果の集合):
+        ${JSON.stringify(partialSummaries)}
+
+        ■製品リスト
+        [インプラント関連] LANDmarker, LANDmark Guide, LANDmark Crown
+        [CT画像関連] NewTom GO, NewTom GiANO, NewTom VGi evo, RevoluX, PSピックス, X-VS, SOPRO717 ファースト, Good Dr's
+        [アプリ] PerioDx, QUON Perio, PaTaKaRUSH
+        [その他] Form3B+, FlashMax460
+
+        ■出力フォーマット(JSONのみ):
+        {
+          "summary": [
+            "【対象製品】(話題に出た製品名を列挙)",
+            "【目的】(通話全体の目的)",
+            "【背景】(経緯や状況)",
+            "【質問・課題】(具体的な相談内容)",
+            "【希望・要望】(相手の要望)"
+          ],
+          "actionItems": [
+            {"task": "具体的なタスク内容", "assignee": "担当者名", "deadline": "期限"}
+          ],
+          "sentiment": "Positive/Neutral/Negative",
+          "sentimentScore": 0.8
+        }
+        
+        注意: 
+        - "summary" の配列には、上記の【見出し】付きの文字列を格納してください。
+        - 同じ内容が何度も繰り返されないように、情報を整理・統合してください。
+      `;
+
+      const finalResultText = await callGeminiDirectly(apiKey, synthesisPrompt);
+      const finalCleanJson = finalResultText.replace(/```json|```/g, '').trim();
+      const finalData = JSON.parse(finalCleanJson);
 
       setResult({
         ...finalData,
         transcript: fullTranscript
       });
+      setActiveTab('summary');
 
       setProgress(100);
       setStatusMessage("完了");
@@ -474,6 +502,7 @@ const App = () => {
 
       <main className="max-w-5xl mx-auto px-4 py-8">
         <div className="grid gap-8">
+          {/* 結果表示エリア */}
           {!result && !isProcessing && (
             <div className="bg-white rounded-2xl p-8 shadow-sm border border-slate-200 text-center">
               <div className="border-2 border-dashed border-slate-300 rounded-xl p-12 flex flex-col items-center justify-center bg-slate-50 hover:bg-indigo-50 transition-colors cursor-pointer" onDragOver={handleDragOver} onDrop={handleDrop}>
@@ -527,7 +556,6 @@ const App = () => {
                       <button onClick={() => setActiveTab('action')} className={`px-6 py-4 text-left font-medium flex items-center space-x-3 ${activeTab === 'action' ? 'bg-indigo-50 text-indigo-700' : 'text-slate-600'}`}><CalendarCheck className="w-5 h-5" /><span>タスク</span></button>
                     </nav>
                   </div>
-                  {/* Sentiment Card */}
                   {result.sentimentScore !== undefined && (
                     <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200">
                       <h4 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4 flex items-center"><Smile className="w-4 h-4 mr-2" />会話の雰囲気</h4>
@@ -542,7 +570,25 @@ const App = () => {
                       <div><div className="flex justify-between mb-6"><h2 className="text-xl font-bold text-slate-800">要約</h2><button onClick={() => copyToClipboard(Array.isArray(result.summary) ? result.summary.join('\n') : result.summary)}><Copy className="w-4 h-4 text-slate-400" /></button></div><ul className="space-y-4">{Array.isArray(result.summary) ? result.summary.map((point, idx) => (<li key={idx} className="flex items-start"><CheckCircle className="w-5 h-5 text-indigo-500 mr-3 mt-0.5 flex-shrink-0" /><span className="text-slate-700 leading-relaxed whitespace-pre-wrap">{point}</span></li>)) : <p className="text-slate-700 leading-relaxed whitespace-pre-wrap">{result.summary}</p>}</ul></div>
                     )}
                     {activeTab === 'transcript' && result.transcript && (
-                      <div><div className="flex justify-between mb-6"><h2 className="text-xl font-bold text-slate-800">文字起こし</h2><button onClick={() => copyToClipboard(result.transcript)}><Copy className="w-4 h-4 text-slate-400" /></button></div><p className="text-slate-700 whitespace-pre-wrap text-sm">{result.transcript}</p></div>
+                      <div className="flex flex-col h-full">
+                        <div className="flex justify-between mb-6">
+                          <h2 className="text-xl font-bold text-slate-800">文字起こし</h2>
+                          <button onClick={() => copyToClipboard(result.transcript)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400"><Copy className="w-4 h-4" /></button>
+                        </div>
+                        <div className="space-y-4 text-slate-700">
+                          {parseTranscript(result.transcript).map((item, idx) => (
+                            <div key={idx} className="flex space-x-3">
+                              <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${item.speaker.includes('顧客') || item.speaker.includes('様') ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-200 text-slate-600'}`}>
+                                <User className="w-4 h-4" />
+                              </div>
+                              <div className="flex-1 bg-slate-50 rounded-lg p-3 border border-slate-100">
+                                {item.speaker && <p className="text-xs font-bold text-slate-500 mb-1">{item.speaker}</p>}
+                                <p className="text-sm leading-relaxed whitespace-pre-wrap">{item.text}</p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
                     )}
                     {activeTab === 'action' && result.actionItems && (
                       <div><h2 className="text-xl font-bold text-slate-800 mb-6">タスク</h2><div className="space-y-4">{result.actionItems.map((item, idx) => (<div key={idx} className="bg-slate-50 rounded-xl p-5 border border-slate-200 flex items-start group cursor-pointer hover:bg-indigo-50 hover:border-indigo-200 transition-all" onClick={() => handleCalendarIntegration(`${item.task} (${item.assignee})`)}><div className="h-6 w-6 rounded border-2 border-slate-300 mr-4 mt-0.5 flex-shrink-0 group-hover:border-indigo-500 transition-colors"></div><div className="flex-1"><p className="font-semibold text-slate-800 mb-1 group-hover:text-indigo-800">{item.task}</p><div className="flex items-center space-x-4 text-sm text-slate-500"><span className="flex items-center"><span className="w-2 h-2 bg-indigo-500 rounded-full mr-2"></span>{item.assignee || "担当者未定"}</span><span className="text-slate-300">|</span><span className="text-orange-600 font-medium">{item.deadline || "期限なし"}</span></div></div><button className="opacity-0 group-hover:opacity-100 p-2 text-slate-400 hover:bg-white hover:text-indigo-600 rounded-lg transition-all shadow-sm"><Calendar className="w-5 h-5" /></button></div>))}</div></div>
