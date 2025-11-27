@@ -13,9 +13,10 @@ const loadLamejs = () => {
       return;
     }
     const script = document.createElement('script');
-    script.src = 'https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lamejs.min.js';
+    // ★修正: 確実に存在するURLに変更 (unpkg.comのlame.all.jsを使用)
+    script.src = 'https://unpkg.com/lamejs@1.2.1/lame.all.js';
     script.onload = () => resolve(window.lamejs);
-    script.onerror = () => reject(new Error('Failed to load lamejs'));
+    script.onerror = () => reject(new Error('Failed to load lamejs library'));
     document.head.appendChild(script);
   });
 };
@@ -272,6 +273,7 @@ const App = () => {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 font-sans selection:bg-indigo-100 selection:text-indigo-800">
+      {/* ヘッダー */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-10">
         <div className="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
           <div className="flex items-center space-x-2">
