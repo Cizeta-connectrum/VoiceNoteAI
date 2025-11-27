@@ -6,7 +6,6 @@ import {
 } from 'lucide-react';
 
 // lamejsをCDNから動的に読み込む関数
-// ビルドエラーを防ぐため、importではなく動的ロードを使用します
 const loadLamejs = () => {
   return new Promise((resolve, reject) => {
     if (window.lamejs) {
@@ -14,7 +13,6 @@ const loadLamejs = () => {
       return;
     }
     const script = document.createElement('script');
-    // 確実に存在するURL (unpkg.com) を使用
     script.src = 'https://unpkg.com/lamejs@1.2.1/lame.all.js';
     script.onload = () => resolve(window.lamejs);
     script.onerror = () => reject(new Error('Failed to load lamejs library'));
@@ -39,15 +37,11 @@ const fileToBase64 = (file) => {
 // 音声を指定範囲で切り出し、軽量MP3に圧縮する関数
 const processAudioChunk = async (file, startTime = 0, duration = null) => {
   try {
-    // まずライブラリをロード
     await loadLamejs();
-
-    console.log(`音声処理開始: ${startTime}秒から${duration ? duration + '秒間' : '最後まで'}`);
     const arrayBuffer = await file.arrayBuffer();
     const AudioContext = window.AudioContext || window.webkitAudioContext;
     const audioContext = new AudioContext();
     
-    // デコード処理
     let audioBuffer;
     try {
       audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
@@ -55,16 +49,14 @@ const processAudioChunk = async (file, startTime = 0, duration = null) => {
       throw new Error("音声ファイルのデコードに失敗しました。");
     }
 
-    // 切り出し範囲の計算
     const totalDuration = audioBuffer.duration;
     const actualStartTime = Math.min(startTime, totalDuration);
     const actualDuration = duration 
       ? Math.min(duration, totalDuration - actualStartTime) 
       : totalDuration - actualStartTime;
 
-    if (actualDuration <= 0) return null; // 処理する範囲がない
+    if (actualDuration <= 0) return null;
 
-    // リサンプリング (16kHz) とモノラル化
     const targetSampleRate = 16000;
     const OfflineContext = window.OfflineAudioContext || window.webkitOfflineAudioContext;
     const offlineContext = new OfflineContext(1, actualDuration * targetSampleRate, targetSampleRate);
@@ -83,7 +75,6 @@ const processAudioChunk = async (file, startTime = 0, duration = null) => {
       samples[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
     }
 
-    // window.lamejs からエンコーダーを取得
     const mp3encoder = new window.lamejs.Mp3Encoder(1, targetSampleRate, 32); 
     const mp3Data = [];
     const sampleBlockSize = 1152;
@@ -110,22 +101,68 @@ const processAudioChunk = async (file, startTime = 0, duration = null) => {
   }
 };
 
-// ★修正: 要約用にテキストを最適化する関数
-// Netlifyのタイムアウト(10秒)を防ぐため、制限文字数を削減して高速化
-const optimizeTranscriptForSummary = (text) => {
-  const MAX_CHARS = 7000; // 15000 -> 7000 に削減
-  if (text.length <= MAX_CHARS) return text;
-
-  console.log(`テキストが長すぎます(${text.length}文字)。要約用に短縮します。`);
+// ★追加: テキストを指定文字数で分割する関数（タイムアウト回避用）
+const splitTextIntoChunks = (text, maxLength = 3500) => {
+  const chunks = [];
+  let currentChunk = "";
   
-  // 前半・中盤・後半を切り出して結合する戦略
-  const partSize = Math.floor(MAX_CHARS / 3);
-  const start = text.substring(0, partSize);
-  const middleStart = Math.floor(text.length / 2) - Math.floor(partSize / 2);
-  const middle = text.substring(middleStart, middleStart + partSize);
-  const end = text.substring(text.length - partSize);
+  // 改行単位で分割して、文字数制限を超えないように結合していく
+  const lines = text.split(/\n/);
 
-  return `${start}\n\n...(中略)...\n\n${middle}\n\n...(中略)...\n\n${end}`;
+  for (const line of lines) {
+    if ((currentChunk + line).length > maxLength) {
+      chunks.push(currentChunk);
+      currentChunk = line + "\n";
+    } else {
+      currentChunk += line + "\n";
+    }
+  }
+  if (currentChunk.trim()) {
+    chunks.push(currentChunk);
+  }
+  return chunks;
+};
+
+// ★追加: 分割された分析結果を統合する関数
+const mergeAnalysisResults = (results) => {
+  const merged = {
+    summary: [],
+    actionItems: [],
+    sentiment: "Neutral",
+    sentimentScore: 0
+  };
+
+  let totalScore = 0;
+  let validScoreCount = 0;
+
+  results.forEach(res => {
+    // 要約の結合
+    if (res.summary && Array.isArray(res.summary)) {
+      merged.summary.push(...res.summary);
+    }
+    // タスクの結合
+    if (res.actionItems && Array.isArray(res.actionItems)) {
+      merged.actionItems.push(...res.actionItems);
+    }
+    // 感情スコアの集計
+    if (typeof res.sentimentScore === 'number') {
+      totalScore += res.sentimentScore;
+      validScoreCount++;
+    }
+  });
+
+  // 感情スコアの平均化
+  const avgScore = validScoreCount > 0 ? totalScore / validScoreCount : 0.5;
+  merged.sentimentScore = avgScore;
+  
+  if (avgScore >= 0.6) merged.sentiment = "Positive";
+  else if (avgScore <= 0.4) merged.sentiment = "Negative";
+  else merged.sentiment = "Neutral";
+
+  // 重複の削除 (完全一致のみ)
+  merged.summary = [...new Set(merged.summary)];
+  
+  return merged;
 };
 
 const App = () => {
@@ -177,20 +214,18 @@ const App = () => {
       let chunkCount = 1;
       let isFinished = false;
 
-      // 圧縮・分割・送信ループ
+      // --- Phase 1: 音声分割と文字起こし ---
       while (!isFinished) {
         setStatusMessage(`音声処理中... (パート ${chunkCount})`);
         
-        // 音声を切り出して圧縮 (CDNロード含む)
         const processed = await processAudioChunk(file, currentStartTime, CHUNK_DURATION);
         
         if (!processed || processed.blob.size === 0) {
-          break; // データなし
+          break;
         }
 
-        // サイズチェック
         if (processed.blob.size > 4.5 * 1024 * 1024) {
-          throw new Error(`分割後のサイズ(${ (processed.blob.size/1024/1024).toFixed(1) }MB)がまだ大きすぎます。`);
+          throw new Error(`分割後のサイズ(${ (processed.blob.size/1024/1024).toFixed(1) }MB)が大きすぎます。`);
         }
 
         setStatusMessage(`パート ${chunkCount} を文字起こし中...`);
@@ -224,56 +259,60 @@ const App = () => {
         }
       }
 
-      setStatusMessage("全データを統合して要約中...");
+      setStatusMessage("要約を生成中... (分割処理)");
       setProgress(90);
 
       if (!fullTranscript.trim()) {
         throw new Error("文字起こしが生成されませんでした。");
       }
 
-      // 要約処理
-      let finalData = {
-        summary: ["(要約の生成に時間がかかりすぎたため、文字起こしのみ表示します)"],
-        actionItems: [],
-        sentiment: "Neutral",
-        sentimentScore: 0.5
-      };
+      // --- Phase 2: 分割要約処理 (Map-Reduce) ---
+      // タイムアウトを防ぐため、長いテキストを3000文字ごとに分割して個別に要約リクエストを送る
+      const textChunks = splitTextIntoChunks(fullTranscript, 3000);
+      const partialResults = [];
 
-      try {
-        // ★修正: 要約用にテキストを最適化（短縮）してから送信
-        const optimizedText = optimizeTranscriptForSummary(fullTranscript);
+      for (let i = 0; i < textChunks.length; i++) {
+        const chunk = textChunks[i];
+        setStatusMessage(`要約生成中... (${i + 1}/${textChunks.length})`);
+        
+        try {
+          const summaryResponse = await fetch('/.netlify/functions/analyze', {
+            method: 'POST',
+            body: JSON.stringify({ 
+              transcriptText: chunk,
+              mode: "summary" 
+            }),
+            headers: { 'Content-Type': 'application/json' }
+          });
 
-        const summaryResponse = await fetch('/.netlify/functions/analyze', {
-          method: 'POST',
-          body: JSON.stringify({ 
-            transcriptText: optimizedText,
-            mode: "summary" 
-          }),
-          headers: { 'Content-Type': 'application/json' }
-        });
-
-        if (!summaryResponse.ok) {
-          console.warn(`要約生成APIエラー: ${summaryResponse.statusText}`);
-          // 失敗時はアラートを出すが、処理は続行
-          alert("要約の生成に失敗しました（タイムアウト）。\n文字起こし結果のみ表示します。");
-        } else {
-          finalData = await summaryResponse.json();
+          if (summaryResponse.ok) {
+            const chunkData = await summaryResponse.json();
+            partialResults.push(chunkData);
+          } else {
+            console.warn(`パート${i+1}の要約に失敗: ${summaryResponse.statusText}`);
+          }
+        } catch (e) {
+          console.error(`パート${i+1}の要約エラー:`, e);
         }
-      } catch (summaryError) {
-        console.error("要約生成エラー:", summaryError);
-        alert("要約の生成中にエラーが発生しました。\n文字起こし結果のみ表示します。");
       }
 
-      // 結果を統合 (文字起こしは常に完全版を使用)
-      setResult({
-        ...finalData,
-        transcript: fullTranscript
-      });
-
-      // 要約成功時はsummaryタブ、失敗時はtranscriptタブを表示
-      if (finalData.summary && finalData.summary[0] && finalData.summary[0].includes("失敗")) {
+      if (partialResults.length === 0) {
+        // 全て失敗した場合は文字起こしのみ表示
+        alert("要約の生成に失敗しました（タイムアウト）。\n文字起こし結果のみ表示します。");
+        setResult({
+          transcript: fullTranscript,
+          summary: ["(要約生成失敗)"],
+          actionItems: [],
+          sentimentScore: 0.5
+        });
         setActiveTab('transcript');
       } else {
+        // 結果の統合
+        const finalData = mergeAnalysisResults(partialResults);
+        setResult({
+          ...finalData,
+          transcript: fullTranscript
+        });
         setActiveTab('summary');
       }
 
