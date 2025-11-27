@@ -10,7 +10,7 @@ const location = process.env.GCP_LOCATION;
 
 const speechClient = new SpeechClient({ credentials });
 const vertexAI = new VertexAI({ project: projectId, location: location, googleAuthOptions: { credentials } });
-const model = vertexAI.preview.getGenerativeModel({ model: 'gemini-1.5-flash' });
+const model = vertexAI.preview.getGenerativeModel({ model: 'gemini-1.5-flash-001' });
 
 exports.handler = async (event, context) => {
   // POSTメソッド以外は拒否
