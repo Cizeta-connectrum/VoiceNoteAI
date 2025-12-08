@@ -5,6 +5,38 @@ import {
   Copy, Trash2, Calendar, FileText, Mail, Settings, X, User
 } from 'lucide-react';
 
+// --- 定数定義: プロンプトで共通して使用するリスト ---
+const PRODUCT_LIST_TEXT = `
+[インプラント関連]
+・インプラントシミュレーションソフト「LANDmarker」(ランドマーカー)
+・サージカルガイド「LANDmark Guide」(ランドマークガイド)
+・デジタル技工「LANDmark Crown」(ランドマーククラウン)
+[CT画像関連]
+・歯科用CT「NewTom GO」(ニュートム ゴー)
+・歯科用CT「NewTom GiANO」(ニュートム ジャノ)
+・歯科用CT「NewTom VGi evo」(ニュートム ブイジーアイ エボ)
+・歯科用CT「RevoluX」(レボルックス)
+・デンタル用IPスキャナー「PSピックス」
+・デンタル用X線センサー「X-VS」
+・口腔内カメラ「SOPRO717 ファースト」 / 「Good Dr's」
+[アプリ・システム]
+・歯周病・インプラント周囲炎診断支援アプリ「PerioDx」(ペリオディーエックス)
+・チェアサイド細菌検査システム「QUON Perio」(クオン ペリオ)
+・くちとれ滑舌アプリ「PaTaKaRUSH」(パタカラッシュ)
+[その他]
+・歯科用３Dプリンタ「Form3B+」
+・光重合機「FlashMax460」
+`;
+
+const MEMBER_LIST_TEXT = `
+・金子 (カネコ)
+・高島 (タカシマ)
+・川越 (カワゴエ)
+・澤田 (サワダ)
+・上田 (ウエダ)
+`;
+// ---------------------------------------------------
+
 // lamejsをCDNから動的に読み込む
 const loadLamejs = () => {
   return new Promise((resolve, reject) => {
@@ -26,6 +58,8 @@ const callGeminiDirectly = async (apiKey, promptText, audioBase64 = null, respon
     throw new Error("APIキーが設定されていません。画面右上の「設定」からGoogle APIキーを入力してください。");
   }
 
+  // 精度重視のため、より高性能なモデルを指定しても良いが、速度とのバランスで 2.0-flash を採用
+  // もし精度を極限まで上げたい場合は "gemini-1.5-pro" に変更を検討
   const modelName = "gemini-2.0-flash";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
 
@@ -51,7 +85,8 @@ const callGeminiDirectly = async (apiKey, promptText, audioBase64 = null, respon
       contents: contents,
       generationConfig: {
         response_mime_type: responseMimeType,
-        max_output_tokens: 8192
+        max_output_tokens: 8192,
+        temperature: 0.2 // 創造性を抑えて正確性を重視
       }
     })
   });
@@ -144,7 +179,8 @@ const processAudioChunk = async (file, startTime = 0, duration = null) => {
     return {
       blob: new File([blob], "chunk.mp3", { type: 'audio/mp3' }),
       duration: actualDuration,
-      isEnd: (actualStartTime + actualDuration) >= totalDuration
+      isEnd: (actualStartTime + actualDuration) >= totalDuration,
+      totalDuration: totalDuration
     };
 
   } catch (e) {
@@ -172,18 +208,23 @@ const splitTextIntoChunks = (text, maxLength = 15000) => {
   return chunks;
 };
 
-// ★話者名を正規化する関数
+// 話者名を正規化する関数
 const normalizeSpeakerName = (rawName) => {
   if (!rawName) return "顧客";
   const members = ["金子", "高島", "川越", "澤田", "上田"];
   
-  // メンバー名が含まれていればその名前に統一
   for (const member of members) {
+    // 苗字が含まれているかチェック
     if (rawName.includes(member)) {
       return member;
     }
   }
-  // メンバー以外はすべて「顧客」
+  // "AIカトウ" 等の誤認識対応
+  if (rawName.includes("アイキャット") || rawName.includes("AI") || rawName.includes("担当")) {
+      // 担当者名の特定ができない場合は汎用的な名前にする手もあるが
+      // ここでは顧客以外であることがわかればよい
+  }
+  
   return "顧客";
 };
 
@@ -195,11 +236,11 @@ const parseTranscript = (text) => {
     if (colonIndex !== -1) {
       const rawSpeaker = line.substring(0, colonIndex).trim();
       return {
-        speaker: normalizeSpeakerName(rawSpeaker), // 正規化を適用
+        speaker: normalizeSpeakerName(rawSpeaker),
         text: line.substring(colonIndex + 1).trim()
       };
     }
-    return { speaker: '顧客', text: line }; // コロンがない場合はとりあえず顧客
+    return { speaker: '顧客', text: line };
   });
 };
 
@@ -226,6 +267,8 @@ const mergeAnalysisResults = (results) => {
   const avgScore = validScoreCount > 0 ? totalScore / validScoreCount : 0.5;
   merged.sentimentScore = avgScore;
   merged.sentiment = avgScore >= 0.6 ? "Positive" : avgScore <= 0.4 ? "Negative" : "Neutral";
+  
+  // 重複削除 (単純なSetではなく、内容の類似性で見たいがここでは完全一致のみ)
   merged.summary = [...new Set(merged.summary)];
   
   return merged;
@@ -296,6 +339,7 @@ const App = () => {
       let currentStartTime = 0;
       let chunkCount = 1;
       let isFinished = false;
+      let audioTotalDuration = 0;
 
       // Phase 1: 文字起こし
       while (!isFinished) {
@@ -304,27 +348,33 @@ const App = () => {
         
         if (!processed || processed.blob.size === 0) break;
 
+        if (chunkCount === 1) {
+            audioTotalDuration = processed.totalDuration;
+        }
+
         setStatusMessage(`パート ${chunkCount} を文字起こし中...`);
         setProgress(10 + (chunkCount * 5)); 
 
         const audioBase64 = await fileToBase64(processed.blob);
 
         const transcriptPrompt = `
-          以下の音声ファイルを聞き取り、会話内容をすべて文字起こししてください。
+          あなたはプロの書記官です。以下の音声ファイルを正確に文字起こししてください。
           
-          【出力形式の絶対ルール】
-          - JSON形式ではなく、純粋なプレーンテキストで出力してください。
-          - 各発言は必ず改行で区切ってください。
-          - 形式: "話者名: 発言内容"
-          - 話者名が特定できない場合は「話者A」「話者B」としてください。
-          - 「アイキャット担当者（金子,高島,川越,澤田,上田）」と「顧客」を可能な限り区別してください。
-          - 余計なMarkdown記法や前置きは不要です。
+          ■重要指示
+          1. 話者識別: 以下の「アイキャット担当者」と「顧客」を文脈や名乗りから厳密に識別してください。
+             【アイキャット担当者】${MEMBER_LIST_TEXT}
+          2. 専門用語: 以下の製品名が会話に出る可能性が高いです。正確に漢字・カタカナ変換してください。
+             【製品リスト】${PRODUCT_LIST_TEXT}
+          3. 整形: 「あー」「えっと」などのフィラー（言い淀み）は削除し、読みやすい自然な日本語文章にしてください。
+          4. 出力形式: 以下の形式で、プレーンテキストとして出力してください。Markdownは不要です。
+             名前: 発言内容
         `;
 
         const transcriptText = await callGeminiDirectly(apiKey, transcriptPrompt, audioBase64, "text/plain");
         
         let cleanedChunk = transcriptText;
         try {
+            // JSONで返ってきた場合の救済措置
             const jsonStart = transcriptText.indexOf('[');
             const jsonEnd = transcriptText.lastIndexOf(']');
             if (jsonStart !== -1 && jsonEnd !== -1) {
@@ -363,6 +413,13 @@ const App = () => {
 
       if (!fullTranscript.trim()) throw new Error("文字起こしが生成されませんでした。");
 
+      // 時間計算
+      const startTimeDate = new Date(file.lastModified);
+      const endTimeDate = new Date(file.lastModified + (audioTotalDuration * 1000));
+      const formatTime = (date) => `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+      const durationMinutes = Math.ceil(audioTotalDuration / 60);
+      const timeInfoString = `${formatTime(startTimeDate)}~${formatTime(endTimeDate)} : ${durationMinutes}分`;
+
       // Phase 2: 要約 (分割して情報を抽出)
       const textChunks = splitTextIntoChunks(fullTranscript, 12000);
       const partialSummaries = [];
@@ -372,17 +429,21 @@ const App = () => {
         setStatusMessage(`内容分析中... (${i + 1}/${textChunks.length})`);
         
         const analysisPrompt = `
-          以下の通話ログから、重要な情報を抽出してください。
+          以下の通話ログの一部から、重要な事実情報を抽出してください。
+          推測は含めず、ログに書かれていることだけを抜き出してください。
 
-          ■抽出してほしい情報
-          - 話題に出ている製品名 (LANDmarker, NewTom, PerioDxなど)
-          - 通話の目的と背景
-          - 顧客からの質問や課題
-          - 決定事項やネクストアクション
+          ■抽出項目
+          - 医院名、クリニック名
+          - 担当者名（アイキャット側、および相手方）
+          - 話題に出ている製品名（${PRODUCT_LIST_TEXT} を参照）
+          - 通話の目的
+          - 経緯
+          - 対応内容
+          - 今後の予定
 
           ■出力形式(JSON):
           {
-            "summary": ["ポイント1", "ポイント2", ...],
+            "summary": ["事実1", "事実2", ...],
             "actionItems": [{"task": "...", "assignee": "...", "deadline": "..."}]
           }
 
@@ -393,15 +454,10 @@ const App = () => {
         try {
           const resultText = await callGeminiDirectly(apiKey, analysisPrompt);
           const cleanJson = resultText.replace(/```json|```/g, '').trim();
-          // ★修正: extracted_points ではなく summary キーを使うように統一
           const chunkData = JSON.parse(cleanJson);
-          // 古いプロンプトの名残で extracted_points が返ってきた場合のケア
           if (chunkData.extracted_points) {
             chunkData.summary = chunkData.extracted_points;
             delete chunkData.extracted_points;
-          }
-          if (chunkData.action_items) {
-            chunkData.actionItems = chunkData.action_items;
           }
           partialSummaries.push(chunkData);
         } catch (e) {
@@ -413,26 +469,39 @@ const App = () => {
       setStatusMessage("最終レポートを作成中...");
       
       const synthesisPrompt = `
-        あなたは優秀な秘書です。
-        以下の「部分的な分析結果リスト」を統合し、重複を排除して、一つの完璧な要約レポートを作成してください。
+        あなたは優秀なビジネス秘書です。
+        以下の「部分的な分析結果リスト」を統合し、一つの完璧な業務報告レポートを作成してください。
 
-        ■入力データ (部分的な分析結果の集合):
+        ■指示
+        1. 重複情報の整理: 分割処理により同じ情報が何度も出てくる場合があります。これらを整理・統合し、簡潔にまとめてください。
+        2. 製品名の正確性: 以下のリストにある製品名は正式名称で記載してください。
+           ${PRODUCT_LIST_TEXT}
+        3. 担当者名: アイキャット担当者（${MEMBER_LIST_TEXT}）を正確に記載してください。
+
+        ■入力データ:
         ${JSON.stringify(partialSummaries)}
 
-        ■製品リスト
-        [インプラント関連] LANDmarker, LANDmark Guide, LANDmark Crown
-        [CT画像関連] NewTom GO, NewTom GiANO, NewTom VGi evo, RevoluX, PSピックス, X-VS, SOPRO717 ファースト, Good Dr's
-        [アプリ] PerioDx, QUON Perio, PaTaKaRUSH
-        [その他] Form3B+, FlashMax460
+        ■要約テンプレート
+        【医院名】(相手のクリニック名や病院名。不明なら「不明」)
+        【担当者名】(アイキャット側の担当者、および相手の名前)
+        【対応時間】${timeInfoString}
+        【対象製品】(話題に出た製品名を列挙。なければ「なし」)
+        【目的】(通話の主な要件)
+        【経緯】(問い合わせに至るまでの背景や状況)
+        【対応】(この通話で行った説明、操作、回答の内容を具体的に)
+        【今後の対応、訪問予定日】(ネクストアクションや約束した日程)
 
         ■出力フォーマット(JSONのみ):
         {
           "summary": [
-            "【対象製品】(話題に出た製品名を列挙)",
-            "【目的】(通話全体の目的)",
-            "【背景】(経緯や状況)",
-            "【質問・課題】(具体的な相談内容)",
-            "【希望・要望】(相手の要望)"
+            "【医院名】...",
+            "【担当者名】...",
+            "【対応時間】...",
+            "【対象製品】...",
+            "【目的】...",
+            "【経緯】...",
+            "【対応】...",
+            "【今後の対応、訪問予定日】..."
           ],
           "actionItems": [
             {"task": "具体的なタスク内容", "assignee": "担当者名", "deadline": "期限"}
@@ -440,10 +509,6 @@ const App = () => {
           "sentiment": "Positive/Neutral/Negative",
           "sentimentScore": 0.8
         }
-        
-        注意: 
-        - "summary" の配列には、上記の【見出し】付きの文字列を格納してください。
-        - 同じ内容が何度も繰り返されないように、情報を整理・統合してください。
       `;
 
       const finalResultText = await callGeminiDirectly(apiKey, synthesisPrompt);
@@ -635,7 +700,7 @@ const App = () => {
                         </ul>
                       </div>
                     )}
-                    {/* ★修正: 文字起こしのレイアウト変更（話者名表示の改善） */}
+                    {/* 文字起こし表示 */}
                     {activeTab === 'transcript' && result.transcript && (
                       <div className="flex flex-col h-full">
                         <div className="flex justify-between mb-6">
@@ -645,7 +710,6 @@ const App = () => {
                         <div className="space-y-4 text-slate-700">
                           {parseTranscript(result.transcript).map((item, idx) => (
                             <div key={idx} className="flex space-x-3">
-                              {/* アイコンと名前を縦並びにする */}
                               <div className="flex flex-col items-center mr-1 min-w-[40px]">
                                 <div className={`flex-shrink-0 w-9 h-9 rounded-full flex items-center justify-center ${item.speaker.includes('顧客') ? 'bg-slate-200 text-slate-600' : 'bg-indigo-100 text-indigo-600'}`}>
                                   <User className="w-5 h-5" />
