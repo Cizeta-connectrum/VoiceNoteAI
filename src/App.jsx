@@ -58,8 +58,6 @@ const callGeminiDirectly = async (apiKey, promptText, audioBase64 = null, respon
     throw new Error("APIキーが設定されていません。画面右上の「設定」からGoogle APIキーを入力してください。");
   }
 
-  // 精度重視のため、より高性能なモデルを指定しても良いが、速度とのバランスで 2.0-flash を採用
-  // もし精度を極限まで上げたい場合は "gemini-1.5-pro" に変更を検討
   const modelName = "gemini-2.0-flash";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
 
@@ -86,7 +84,7 @@ const callGeminiDirectly = async (apiKey, promptText, audioBase64 = null, respon
       generationConfig: {
         response_mime_type: responseMimeType,
         max_output_tokens: 8192,
-        temperature: 0.2 // 創造性を抑えて正確性を重視
+        temperature: 0.2
       }
     })
   });
@@ -214,7 +212,6 @@ const normalizeSpeakerName = (rawName) => {
   const members = ["金子", "高島", "川越", "澤田", "上田"];
   
   for (const member of members) {
-    // 苗字が含まれているかチェック
     if (rawName.includes(member)) {
       return member;
     }
@@ -268,7 +265,7 @@ const mergeAnalysisResults = (results) => {
   merged.sentimentScore = avgScore;
   merged.sentiment = avgScore >= 0.6 ? "Positive" : avgScore <= 0.4 ? "Negative" : "Neutral";
   
-  // 重複削除 (単純なSetではなく、内容の類似性で見たいがここでは完全一致のみ)
+  // 重複削除
   merged.summary = [...new Set(merged.summary)];
   
   return merged;
@@ -374,7 +371,6 @@ const App = () => {
         
         let cleanedChunk = transcriptText;
         try {
-            // JSONで返ってきた場合の救済措置
             const jsonStart = transcriptText.indexOf('[');
             const jsonEnd = transcriptText.lastIndexOf(']');
             if (jsonStart !== -1 && jsonEnd !== -1) {
@@ -477,6 +473,7 @@ const App = () => {
         2. 製品名の正確性: 以下のリストにある製品名は正式名称で記載してください。
            ${PRODUCT_LIST_TEXT}
         3. 担当者名: アイキャット担当者（${MEMBER_LIST_TEXT}）を正確に記載してください。
+        4. 対応時間: 必ず "${timeInfoString}" と記載してください。音声の内容から推測しないでください。
 
         ■入力データ:
         ${JSON.stringify(partialSummaries)}
