@@ -283,6 +283,7 @@ const mergeAnalysisResults = (results) => {
   const avgScore = validScoreCount > 0 ? totalScore / validScoreCount : 0.5;
   merged.sentimentScore = avgScore;
   merged.sentiment = avgScore >= 0.6 ? "Positive" : avgScore <= 0.4 ? "Negative" : "Neutral";
+  
   merged.summary = [...new Set(merged.summary)];
   
   return merged;
@@ -298,9 +299,8 @@ const App = () => {
   const audioRef = useRef(null);
   const [activeTab, setActiveTab] = useState('summary');
   const [statusMessage, setStatusMessage] = useState("");
-  const [saveStatus, setSaveStatus] = useState(null); // 'saving', 'success', 'error'
+  const [saveStatus, setSaveStatus] = useState(null);
   
-  // 設定 (API Key & GAS URL)
   const [apiKey, setApiKey] = useState("");
   const [gasUrl, setGasUrl] = useState("");
   const [showSettings, setShowSettings] = useState(false);
@@ -343,13 +343,12 @@ const App = () => {
     }
   };
 
-  // ★追加: スプレッドシートへの自動保存関数
+  // スプレッドシートへの自動保存関数
   const autoSaveToSpreadsheet = async (data, fileName) => {
-    if (!gasUrl) return; // URLが設定されていなければ何もしない
+    if (!gasUrl) return;
 
     setSaveStatus('saving');
     try {
-      // データの整理
       const summaryData = {};
       const summaryLines = Array.isArray(data.summary) ? data.summary : [data.summary];
       summaryLines.forEach(line => {
@@ -373,10 +372,10 @@ const App = () => {
         nextAction: summaryData["今後の対応、訪問予定日"] || "",
         tasks: tasks,
         sentiment: `${data.sentiment} (${Math.round(data.sentimentScore * 100)}%)`,
-        fileName: fileName
+        fileName: fileName,
+        transcript: data.transcript || "" // ★追加: 全文文字起こしを送信
       };
 
-      // CORS回避のため no-cors モード等は使わず、text/plainで送ってGAS側でパースさせる
       await fetch(gasUrl, {
         method: 'POST',
         body: JSON.stringify(payload),
@@ -385,7 +384,6 @@ const App = () => {
         },
       });
 
-      // no-corsだとレスポンスが見れないが、エラーが出なければ成功とみなす
       setSaveStatus('success');
       console.log("Spreadsheet auto-save request sent.");
 
@@ -506,7 +504,6 @@ const App = () => {
         
         const analysisPrompt = `
           以下の通話ログの一部から、重要な事実情報を抽出してください。
-          推測は含めず、ログに書かれていることだけを抜き出してください。
 
           ■抽出項目
           - 医院名、クリニック名
@@ -607,7 +604,7 @@ const App = () => {
       setResult(finalResult);
       setActiveTab('summary');
 
-      // ★ここで自動保存を実行
+      // 自動保存の実行
       if (gasUrl) {
         setStatusMessage("スプレッドシートに保存中...");
         await autoSaveToSpreadsheet(finalResult, file.name);
@@ -661,7 +658,6 @@ const App = () => {
             <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-600 to-violet-600">VoiceNote AI</h1>
           </div>
           <div className="flex items-center space-x-4">
-            {/* 保存ステータス表示 */}
             {saveStatus === 'saving' && <span className="text-xs text-blue-600 animate-pulse">保存中...</span>}
             {saveStatus === 'success' && <span className="text-xs text-green-600 flex items-center"><CheckCircle className="w-3 h-3 mr-1"/>保存完了</span>}
             {saveStatus === 'error' && <span className="text-xs text-red-500">保存失敗</span>}
@@ -711,7 +707,7 @@ const App = () => {
                   className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
                   placeholder="https://script.google.com/macros/s/..."
                 />
-                <p className="text-xs text-slate-500 mt-1">スプレッドシート連携用のウェブアプリURL（設定すると解析後に自動保存されます）</p>
+                <p className="text-xs text-slate-500 mt-1">Doc自動作成・スプレッドシート連携用のURL</p>
               </div>
               <button 
                 onClick={saveSettings}
@@ -808,6 +804,7 @@ const App = () => {
                         </ul>
                       </div>
                     )}
+                    {/* 文字起こし表示 */}
                     {activeTab === 'transcript' && result.transcript && (
                       <div className="flex flex-col h-full">
                         <div className="flex justify-between mb-6">
