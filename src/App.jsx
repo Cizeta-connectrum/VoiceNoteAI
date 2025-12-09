@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   UploadCloud, FileAudio, CheckCircle, Play, Pause, Cpu, List, 
   MessageSquare, CalendarCheck, Smile, AlertCircle, Download, 
-  Copy, Trash2, Calendar, FileText, Mail, Settings, X, User
+  Copy, Trash2, Calendar, FileText, Mail, Settings, X, User,
+  FileSpreadsheet, Save
 } from 'lucide-react';
 
 // --- 定数定義: プロンプトで共通して使用するリスト ---
@@ -206,32 +207,27 @@ const splitTextIntoChunks = (text, maxLength = 15000) => {
   return chunks;
 };
 
-// ★追加: ファイル名から日時を抽出する関数
+// ファイル名から日時を抽出する関数
 const extractDateFromFile = (filename, lastModified) => {
-  // パターン1: YYYYMMDDHHmm (例: 202512021110)
   const matchFull = filename.match(/(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})/);
   if (matchFull) {
     const year = parseInt(matchFull[1]);
-    const month = parseInt(matchFull[2]) - 1; // 月は0始まり
+    const month = parseInt(matchFull[2]) - 1;
     const day = parseInt(matchFull[3]);
     const hour = parseInt(matchFull[4]);
     const minute = parseInt(matchFull[5]);
     return new Date(year, month, day, hour, minute);
   }
 
-  // パターン2: YYYYMMDD (例: 20251202)
   const matchDateOnly = filename.match(/(\d{4})(\d{2})(\d{2})/);
   if (matchDateOnly) {
     const year = parseInt(matchDateOnly[1]);
     const month = parseInt(matchDateOnly[2]) - 1;
     const day = parseInt(matchDateOnly[3]);
-    // 時間がない場合は、作成日時の時間を使うか、9:00などにするか。
-    // ここでは作成日時の時間を採用
     const tempDate = new Date(lastModified);
     return new Date(year, month, day, tempDate.getHours(), tempDate.getMinutes());
   }
 
-  // マッチしない場合はファイルの更新日時を返す
   return new Date(lastModified);
 };
 
@@ -287,8 +283,6 @@ const mergeAnalysisResults = (results) => {
   const avgScore = validScoreCount > 0 ? totalScore / validScoreCount : 0.5;
   merged.sentimentScore = avgScore;
   merged.sentiment = avgScore >= 0.6 ? "Positive" : avgScore <= 0.4 ? "Negative" : "Neutral";
-  
-  // 重複削除
   merged.summary = [...new Set(merged.summary)];
   
   return merged;
@@ -304,19 +298,26 @@ const App = () => {
   const audioRef = useRef(null);
   const [activeTab, setActiveTab] = useState('summary');
   const [statusMessage, setStatusMessage] = useState("");
+  const [saveStatus, setSaveStatus] = useState(null); // 'saving', 'success', 'error'
   
+  // 設定 (API Key & GAS URL)
   const [apiKey, setApiKey] = useState("");
+  const [gasUrl, setGasUrl] = useState("");
   const [showSettings, setShowSettings] = useState(false);
 
   useEffect(() => {
     const storedKey = localStorage.getItem('google_api_key');
     if (storedKey) setApiKey(storedKey);
+    
+    const storedGasUrl = localStorage.getItem('gas_app_url');
+    if (storedGasUrl) setGasUrl(storedGasUrl);
   }, []);
 
-  const saveApiKey = () => {
+  const saveSettings = () => {
     localStorage.setItem('google_api_key', apiKey);
+    localStorage.setItem('gas_app_url', gasUrl);
     setShowSettings(false);
-    alert("APIキーを保存しました。");
+    alert("設定を保存しました。");
   };
 
   const handleFileChange = (e) => {
@@ -335,9 +336,62 @@ const App = () => {
       setFile(selectedFile);
       setFileUrl(URL.createObjectURL(selectedFile));
       setResult(null);
+      setSaveStatus(null);
       setProgress(0);
       setIsPlaying(false);
       setStatusMessage("");
+    }
+  };
+
+  // ★追加: スプレッドシートへの自動保存関数
+  const autoSaveToSpreadsheet = async (data, fileName) => {
+    if (!gasUrl) return; // URLが設定されていなければ何もしない
+
+    setSaveStatus('saving');
+    try {
+      // データの整理
+      const summaryData = {};
+      const summaryLines = Array.isArray(data.summary) ? data.summary : [data.summary];
+      summaryLines.forEach(line => {
+        const match = line.match(/^【(.*?)】(.*)$/);
+        if (match) {
+          summaryData[match[1]] = match[2];
+        }
+      });
+
+      const tasks = data.actionItems ? data.actionItems.map(t => `・${t.task} (${t.assignee})`).join('\n') : "";
+
+      const payload = {
+        date: summaryData["日時"] || new Date().toLocaleString(),
+        hospitalName: summaryData["医院名"] || "",
+        PIC: summaryData["担当者名"] || "",
+        duration: summaryData["対応時間"] || "",
+        products: summaryData["対象製品"] || "",
+        purpose: summaryData["目的"] || "",
+        background: summaryData["経緯"] || "",
+        response: summaryData["対応"] || "",
+        nextAction: summaryData["今後の対応、訪問予定日"] || "",
+        tasks: tasks,
+        sentiment: `${data.sentiment} (${Math.round(data.sentimentScore * 100)}%)`,
+        fileName: fileName
+      };
+
+      // CORS回避のため no-cors モード等は使わず、text/plainで送ってGAS側でパースさせる
+      await fetch(gasUrl, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+        headers: {
+          'Content-Type': 'text/plain;charset=utf-8',
+        },
+      });
+
+      // no-corsだとレスポンスが見れないが、エラーが出なければ成功とみなす
+      setSaveStatus('success');
+      console.log("Spreadsheet auto-save request sent.");
+
+    } catch (error) {
+      console.error("Auto-save failed:", error);
+      setSaveStatus('error');
     }
   };
 
@@ -350,6 +404,7 @@ const App = () => {
     }
 
     setIsProcessing(true);
+    setSaveStatus(null);
     setProgress(5);
     setStatusMessage("準備中...");
 
@@ -432,18 +487,16 @@ const App = () => {
 
       if (!fullTranscript.trim()) throw new Error("文字起こしが生成されませんでした。");
 
-      // ★改良: 時間計算ロジック (ファイル名優先)
+      // 時間計算
       const startTimeDate = extractDateFromFile(file.name, file.lastModified);
       const endTimeDate = new Date(startTimeDate.getTime() + (audioTotalDuration * 1000));
-      
       const formatTime = (date) => `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
       const formatTimeOnly = (date) => `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
-      
       const durationMinutes = Math.ceil(audioTotalDuration / 60);
-      const dateString = formatTime(startTimeDate); // YYYY年MM月DD日 HH:mm
+      const dateString = formatTime(startTimeDate);
       const timeRangeString = `${formatTimeOnly(startTimeDate)}~${formatTimeOnly(endTimeDate)} : ${durationMinutes}分`;
 
-      // Phase 2: 要約 (分割して情報を抽出)
+      // Phase 2: 要約
       const textChunks = splitTextIntoChunks(fullTranscript, 12000);
       const partialSummaries = [];
 
@@ -546,11 +599,19 @@ const App = () => {
       const finalCleanJson = finalResultText.replace(/```json|```/g, '').trim();
       const finalData = JSON.parse(finalCleanJson);
 
-      setResult({
+      const finalResult = {
         ...finalData,
         transcript: fullTranscript
-      });
+      };
+
+      setResult(finalResult);
       setActiveTab('summary');
+
+      // ★ここで自動保存を実行
+      if (gasUrl) {
+        setStatusMessage("スプレッドシートに保存中...");
+        await autoSaveToSpreadsheet(finalResult, file.name);
+      }
 
       setProgress(100);
       setStatusMessage("完了");
@@ -588,7 +649,7 @@ const App = () => {
     window.open(`https://www.google.com/calendar/render?action=TEMPLATE&text=${title}&details=${details}`, "_blank");
   };
 
-  const resetApp = () => { setFile(null); setFileUrl(null); setResult(null); setProgress(0); setIsProcessing(false); setIsPlaying(false); setStatusMessage(""); };
+  const resetApp = () => { setFile(null); setFileUrl(null); setResult(null); setProgress(0); setIsProcessing(false); setIsPlaying(false); setStatusMessage(""); setSaveStatus(null); };
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 font-sans selection:bg-indigo-100 selection:text-indigo-800">
@@ -600,6 +661,11 @@ const App = () => {
             <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-600 to-violet-600">VoiceNote AI</h1>
           </div>
           <div className="flex items-center space-x-4">
+            {/* 保存ステータス表示 */}
+            {saveStatus === 'saving' && <span className="text-xs text-blue-600 animate-pulse">保存中...</span>}
+            {saveStatus === 'success' && <span className="text-xs text-green-600 flex items-center"><CheckCircle className="w-3 h-3 mr-1"/>保存完了</span>}
+            {saveStatus === 'error' && <span className="text-xs text-red-500">保存失敗</span>}
+            
             <button 
               onClick={() => setShowSettings(true)}
               className="text-sm font-medium text-slate-500 hover:text-indigo-600 transition-colors flex items-center gap-1"
@@ -622,7 +688,7 @@ const App = () => {
             </button>
             <h2 className="text-xl font-bold text-slate-800 mb-4 flex items-center">
               <Settings className="w-5 h-5 mr-2 text-indigo-600" />
-              API設定
+              設定
             </h2>
             <div className="space-y-4">
               <div>
@@ -634,10 +700,21 @@ const App = () => {
                   className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
                   placeholder="AIza..."
                 />
-                <p className="text-xs text-slate-500 mt-1">Google AI Studioで取得したキーを入力してください。</p>
+                <p className="text-xs text-slate-500 mt-1">Google AI Studioで取得したキー</p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Google Apps Script (GAS) URL</label>
+                <input 
+                  type="text" 
+                  value={gasUrl}
+                  onChange={(e) => setGasUrl(e.target.value)}
+                  className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                  placeholder="https://script.google.com/macros/s/..."
+                />
+                <p className="text-xs text-slate-500 mt-1">スプレッドシート連携用のウェブアプリURL（設定すると解析後に自動保存されます）</p>
               </div>
               <button 
-                onClick={saveApiKey}
+                onClick={saveSettings}
                 className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-lg font-bold transition-colors"
               >
                 保存する
@@ -731,7 +808,6 @@ const App = () => {
                         </ul>
                       </div>
                     )}
-                    {/* 文字起こし表示 */}
                     {activeTab === 'transcript' && result.transcript && (
                       <div className="flex flex-col h-full">
                         <div className="flex justify-between mb-6">
