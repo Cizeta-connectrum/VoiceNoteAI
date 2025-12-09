@@ -206,6 +206,35 @@ const splitTextIntoChunks = (text, maxLength = 15000) => {
   return chunks;
 };
 
+// ★追加: ファイル名から日時を抽出する関数
+const extractDateFromFile = (filename, lastModified) => {
+  // パターン1: YYYYMMDDHHmm (例: 202512021110)
+  const matchFull = filename.match(/(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})/);
+  if (matchFull) {
+    const year = parseInt(matchFull[1]);
+    const month = parseInt(matchFull[2]) - 1; // 月は0始まり
+    const day = parseInt(matchFull[3]);
+    const hour = parseInt(matchFull[4]);
+    const minute = parseInt(matchFull[5]);
+    return new Date(year, month, day, hour, minute);
+  }
+
+  // パターン2: YYYYMMDD (例: 20251202)
+  const matchDateOnly = filename.match(/(\d{4})(\d{2})(\d{2})/);
+  if (matchDateOnly) {
+    const year = parseInt(matchDateOnly[1]);
+    const month = parseInt(matchDateOnly[2]) - 1;
+    const day = parseInt(matchDateOnly[3]);
+    // 時間がない場合は、作成日時の時間を使うか、9:00などにするか。
+    // ここでは作成日時の時間を採用
+    const tempDate = new Date(lastModified);
+    return new Date(year, month, day, tempDate.getHours(), tempDate.getMinutes());
+  }
+
+  // マッチしない場合はファイルの更新日時を返す
+  return new Date(lastModified);
+};
+
 // 話者名を正規化する関数
 const normalizeSpeakerName = (rawName) => {
   if (!rawName) return "顧客";
@@ -216,12 +245,6 @@ const normalizeSpeakerName = (rawName) => {
       return member;
     }
   }
-  // "AIカトウ" 等の誤認識対応
-  if (rawName.includes("アイキャット") || rawName.includes("AI") || rawName.includes("担当")) {
-      // 担当者名の特定ができない場合は汎用的な名前にする手もあるが
-      // ここでは顧客以外であることがわかればよい
-  }
-  
   return "顧客";
 };
 
@@ -409,12 +432,16 @@ const App = () => {
 
       if (!fullTranscript.trim()) throw new Error("文字起こしが生成されませんでした。");
 
-      // 時間計算
-      const startTimeDate = new Date(file.lastModified);
-      const endTimeDate = new Date(file.lastModified + (audioTotalDuration * 1000));
-      const formatTime = (date) => `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+      // ★改良: 時間計算ロジック (ファイル名優先)
+      const startTimeDate = extractDateFromFile(file.name, file.lastModified);
+      const endTimeDate = new Date(startTimeDate.getTime() + (audioTotalDuration * 1000));
+      
+      const formatTime = (date) => `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+      const formatTimeOnly = (date) => `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+      
       const durationMinutes = Math.ceil(audioTotalDuration / 60);
-      const timeInfoString = `${formatTime(startTimeDate)}~${formatTime(endTimeDate)} : ${durationMinutes}分`;
+      const dateString = formatTime(startTimeDate); // YYYY年MM月DD日 HH:mm
+      const timeRangeString = `${formatTimeOnly(startTimeDate)}~${formatTimeOnly(endTimeDate)} : ${durationMinutes}分`;
 
       // Phase 2: 要約 (分割して情報を抽出)
       const textChunks = splitTextIntoChunks(fullTranscript, 12000);
@@ -473,7 +500,10 @@ const App = () => {
         2. 製品名の正確性: 以下のリストにある製品名は正式名称で記載してください。
            ${PRODUCT_LIST_TEXT}
         3. 担当者名: アイキャット担当者（${MEMBER_LIST_TEXT}）を正確に記載してください。
-        4. 対応時間: 必ず "${timeInfoString}" と記載してください。音声の内容から推測しないでください。
+        4. 日時情報: 以下の情報を必ずそのまま記載してください。
+           - 日時: ${dateString}
+           - 音声ファイル名: ${file.name}
+           - 対応時間: ${timeRangeString}
 
         ■入力データ:
         ${JSON.stringify(partialSummaries)}
@@ -481,7 +511,9 @@ const App = () => {
         ■要約テンプレート
         【医院名】(相手のクリニック名や病院名。不明なら「不明」)
         【担当者名】(アイキャット側の担当者、および相手の名前)
-        【対応時間】${timeInfoString}
+        【日時】${dateString}
+        【対応時間】${timeRangeString}
+        【音声ファイル名】${file.name}
         【対象製品】(話題に出た製品名を列挙。なければ「なし」)
         【目的】(通話の主な要件)
         【経緯】(問い合わせに至るまでの背景や状況)
@@ -493,7 +525,9 @@ const App = () => {
           "summary": [
             "【医院名】...",
             "【担当者名】...",
+            "【日時】...",
             "【対応時間】...",
+            "【音声ファイル名】...",
             "【対象製品】...",
             "【目的】...",
             "【経緯】...",
