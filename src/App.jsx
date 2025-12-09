@@ -3,10 +3,10 @@ import {
   UploadCloud, FileAudio, CheckCircle, Play, Pause, Cpu, List, 
   MessageSquare, CalendarCheck, Smile, AlertCircle, Download, 
   Copy, Trash2, Calendar, FileText, Mail, Settings, X, User,
-  FileSpreadsheet, Save
+  FileSpreadsheet, Edit, Save, RotateCcw
 } from 'lucide-react';
 
-// --- 定数定義: プロンプトで共通して使用するリスト ---
+// --- 定数定義 ---
 const PRODUCT_LIST_TEXT = `
 [インプラント関連]
 ・インプラントシミュレーションソフト「LANDmarker」(ランドマーカー)
@@ -36,6 +36,13 @@ const MEMBER_LIST_TEXT = `
 ・澤田 (サワダ)
 ・上田 (ウエダ)
 `;
+
+// 要約の項目順序定義
+const SUMMARY_ORDER = [
+  "医院名", "担当者名", "日時", "対応時間", "音声ファイル名", 
+  "対象製品", "目的", "経緯", "対応", "今後の対応、訪問予定日"
+];
+
 // ---------------------------------------------------
 
 // lamejsをCDNから動的に読み込む
@@ -260,6 +267,25 @@ const parseTranscript = (text) => {
   });
 };
 
+// 要約配列をオブジェクトに変換する関数
+const parseSummaryToObj = (summaryArray) => {
+  const data = {};
+  if (!Array.isArray(summaryArray)) return {};
+  
+  summaryArray.forEach(line => {
+    const match = line.match(/^【(.*?)】(.*)$/);
+    if (match) {
+      data[match[1]] = match[2];
+    }
+  });
+  return data;
+};
+
+// オブジェクトを要約配列に戻す関数
+const formatObjToSummary = (summaryObj) => {
+  return SUMMARY_ORDER.map(key => `【${key}】${summaryObj[key] || ""}`);
+};
+
 const mergeAnalysisResults = (results) => {
   const merged = {
     summary: [],
@@ -301,6 +327,10 @@ const App = () => {
   const [statusMessage, setStatusMessage] = useState("");
   const [saveStatus, setSaveStatus] = useState(null);
   
+  const [docId, setDocId] = useState(null); // Google Doc ID保持用
+  const [isEditing, setIsEditing] = useState(false); // 編集モード
+  const [editFormData, setEditFormData] = useState({}); // 編集フォームデータ
+
   const [apiKey, setApiKey] = useState("");
   const [gasUrl, setGasUrl] = useState("");
   const [showSettings, setShowSettings] = useState(false);
@@ -336,28 +366,22 @@ const App = () => {
       setFile(selectedFile);
       setFileUrl(URL.createObjectURL(selectedFile));
       setResult(null);
+      setDocId(null); // ファイル変更時はIDリセット
       setSaveStatus(null);
       setProgress(0);
       setIsPlaying(false);
       setStatusMessage("");
+      setIsEditing(false);
     }
   };
 
-  // スプレッドシートへの自動保存関数
-  const autoSaveToSpreadsheet = async (data, fileName) => {
+  // スプレッドシート＆Docへの自動保存関数（上書き対応）
+  const autoSaveToSpreadsheet = async (data, fileName, existingDocId = null) => {
     if (!gasUrl) return;
 
     setSaveStatus('saving');
     try {
-      const summaryData = {};
-      const summaryLines = Array.isArray(data.summary) ? data.summary : [data.summary];
-      summaryLines.forEach(line => {
-        const match = line.match(/^【(.*?)】(.*)$/);
-        if (match) {
-          summaryData[match[1]] = match[2];
-        }
-      });
-
+      const summaryData = parseSummaryToObj(data.summary);
       const tasks = data.actionItems ? data.actionItems.map(t => `・${t.task} (${t.assignee})`).join('\n') : "";
 
       const payload = {
@@ -373,10 +397,11 @@ const App = () => {
         tasks: tasks,
         sentiment: `${data.sentiment} (${Math.round(data.sentimentScore * 100)}%)`,
         fileName: fileName,
-        transcript: data.transcript || "" // ★追加: 全文文字起こしを送信
+        transcript: data.transcript || "",
+        docId: existingDocId // 編集時はIDを渡す
       };
 
-      await fetch(gasUrl, {
+      const response = await fetch(gasUrl, {
         method: 'POST',
         body: JSON.stringify(payload),
         headers: {
@@ -384,13 +409,60 @@ const App = () => {
         },
       });
 
-      setSaveStatus('success');
-      console.log("Spreadsheet auto-save request sent.");
+      const responseData = await response.json();
+
+      if (responseData.status === 'success') {
+        setSaveStatus('success');
+        console.log("Save success:", responseData);
+        // 新規作成されたDocIDを保存
+        if (responseData.docId) {
+          setDocId(responseData.docId);
+        }
+      } else {
+        setSaveStatus('error');
+        console.error("GAS Error:", responseData.message);
+      }
 
     } catch (error) {
       console.error("Auto-save failed:", error);
       setSaveStatus('error');
     }
+  };
+
+  // 編集開始
+  const handleStartEdit = () => {
+    const summaryObj = parseSummaryToObj(result.summary);
+    setEditFormData(summaryObj);
+    setIsEditing(true);
+  };
+
+  // 編集キャンセル
+  const handleCancelEdit = () => {
+    setIsEditing(false);
+    setEditFormData({});
+  };
+
+  // 編集保存
+  const handleSaveEdit = async () => {
+    if (!window.confirm("編集内容を保存し、Googleドキュメントとスプレッドシートを更新しますか？")) return;
+
+    const newSummaryArray = formatObjToSummary(editFormData);
+    const newResult = { ...result, summary: newSummaryArray };
+    
+    setResult(newResult);
+    setIsEditing(false);
+
+    // GASへ上書き保存リクエスト
+    await autoSaveToSpreadsheet(newResult, file.name, docId);
+    alert("保存しました。");
+  };
+
+  // フォーム入力ハンドラ
+  const handleFormChange = (key, value) => {
+    setEditFormData(prev => ({
+      ...prev,
+      [key]: value
+    }));
   };
 
   const startProcessing = async () => {
@@ -403,6 +475,7 @@ const App = () => {
 
     setIsProcessing(true);
     setSaveStatus(null);
+    setDocId(null);
     setProgress(5);
     setStatusMessage("準備中...");
 
@@ -604,7 +677,7 @@ const App = () => {
       setResult(finalResult);
       setActiveTab('summary');
 
-      // 自動保存の実行
+      // 自動保存
       if (gasUrl) {
         setStatusMessage("スプレッドシートに保存中...");
         await autoSaveToSpreadsheet(finalResult, file.name);
@@ -659,7 +732,7 @@ const App = () => {
           </div>
           <div className="flex items-center space-x-4">
             {saveStatus === 'saving' && <span className="text-xs text-blue-600 animate-pulse">保存中...</span>}
-            {saveStatus === 'success' && <span className="text-xs text-green-600 flex items-center"><CheckCircle className="w-3 h-3 mr-1"/>保存完了</span>}
+            {saveStatus === 'success' && <span className="text-xs text-green-600 flex items-center"><CheckCircle className="w-3 h-3 mr-1"/>保存済</span>}
             {saveStatus === 'error' && <span className="text-xs text-red-500">保存失敗</span>}
             
             <button 
@@ -707,7 +780,7 @@ const App = () => {
                   className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
                   placeholder="https://script.google.com/macros/s/..."
                 />
-                <p className="text-xs text-slate-500 mt-1">Doc自動作成・スプレッドシート連携用のURL</p>
+                <p className="text-xs text-slate-500 mt-1">スプレッドシート連携用のウェブアプリURL</p>
               </div>
               <button 
                 onClick={saveSettings}
@@ -791,19 +864,53 @@ const App = () => {
                 
                 <div className="md:col-span-2">
                   <div className="bg-white rounded-2xl shadow-sm p-8 min-h-[500px]">
+                    {/* 要約タブ (編集機能付き) */}
                     {activeTab === 'summary' && result.summary && (
                       <div>
-                        <div className="flex justify-between mb-6"><h2 className="text-xl font-bold text-slate-800">要約</h2><button onClick={() => copyToClipboard(Array.isArray(result.summary) ? result.summary.join('\n') : result.summary)}><Copy className="w-4 h-4 text-slate-400" /></button></div>
-                        <ul className="space-y-4">
-                          {Array.isArray(result.summary) ? result.summary.map((point, idx) => (
-                            <li key={idx} className="flex items-start">
-                              <CheckCircle className="w-5 h-5 text-indigo-500 mr-3 mt-0.5 flex-shrink-0" />
-                              <span className="text-slate-700 leading-relaxed whitespace-pre-wrap">{point}</span>
-                            </li>
-                          )) : <p className="text-slate-700 leading-relaxed whitespace-pre-wrap">{result.summary}</p>}
-                        </ul>
+                        <div className="flex justify-between mb-6">
+                          <h2 className="text-xl font-bold text-slate-800">要約</h2>
+                          <div className="flex space-x-2">
+                            {isEditing ? (
+                              <>
+                                <button onClick={handleCancelEdit} className="p-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-slate-600 text-xs font-bold">キャンセル</button>
+                                <button onClick={handleSaveEdit} className="flex items-center p-2 bg-indigo-600 hover:bg-indigo-700 rounded-lg text-white text-xs font-bold"><Save className="w-4 h-4 mr-1"/>更新して保存</button>
+                              </>
+                            ) : (
+                              <>
+                                <button onClick={handleStartEdit} className="flex items-center p-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-slate-600 text-xs font-bold"><Edit className="w-4 h-4 mr-1"/>編集</button>
+                                <button onClick={() => copyToClipboard(Array.isArray(result.summary) ? result.summary.join('\n') : result.summary)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400"><Copy className="w-4 h-4" /></button>
+                              </>
+                            )}
+                          </div>
+                        </div>
+
+                        {isEditing ? (
+                          <div className="space-y-4">
+                            {SUMMARY_ORDER.map((key) => (
+                              <div key={key}>
+                                <label className="block text-xs font-bold text-slate-500 mb-1">【{key}】</label>
+                                <textarea 
+                                  value={editFormData[key] || ""} 
+                                  onChange={(e) => handleFormChange(key, e.target.value)}
+                                  className="w-full p-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+                                  rows={3}
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <ul className="space-y-4">
+                            {Array.isArray(result.summary) ? result.summary.map((point, idx) => (
+                              <li key={idx} className="flex items-start">
+                                <CheckCircle className="w-5 h-5 text-indigo-500 mr-3 mt-0.5 flex-shrink-0" />
+                                <span className="text-slate-700 leading-relaxed whitespace-pre-wrap">{point}</span>
+                              </li>
+                            )) : <p className="text-slate-700 leading-relaxed whitespace-pre-wrap">{result.summary}</p>}
+                          </ul>
+                        )}
                       </div>
                     )}
+
                     {/* 文字起こし表示 */}
                     {activeTab === 'transcript' && result.transcript && (
                       <div className="flex flex-col h-full">
